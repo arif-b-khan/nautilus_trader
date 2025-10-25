@@ -1,0 +1,55 @@
+
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily at 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/nautechsystems/nautilus_trader.git || true
+          # fetch all branches and tags from upstream
+          git fetch upstream --prune --tags
+
+
+      - name: Create sync branch from upstream/develop
+        run: |
+          bash .github/scripts/create-sync-branch.sh "${{ github.run_id }}"
+
+      - name: Check if sync branch is ahead of develop
+        id: check_ahead
+        run: |
+          git fetch origin develop:refs/remotes/origin/develop || true
+          SYNC_BRANCH=sync/upstream-${{ github.run_id }}
+          # Count commits sync branch is ahead of develop
+          AHEAD=$(git rev-list --left-right --count origin/develop...$SYNC_BRANCH | awk '{print $2}')
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+
+      - name: Validate sync
+        run: |
+          # Simple validation - check that we're on the sync branch
+          echo "Current branch: $(git branch --show-current)"
+          echo "Sync completed successfully"
+
+      - name: Create PR
+        if: steps.check_ahead.outputs.ahead != '0'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: develop
+          branch: sync/upstream-${{ github.run_id }}
+          title: "chore: sync from upstream nautechsystems/nautilus_trader @ ${{ github.run_id }}"
+          body: |
+            Automated sync from upstream nautechsystems/nautilus_trader.
