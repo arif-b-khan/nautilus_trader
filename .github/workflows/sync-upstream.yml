@@ -17,16 +17,53 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Add upstream
+      - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/nautechsystems/nautilus_trader.git || true
-          # fetch all branches and tags from upstream
+          # fetch all branches and tags from upstream and origin
+          git fetch origin --prune
           git fetch upstream --prune --tags
-
 
       - name: Create sync branch from upstream/develop
         run: |
-          bash .github/scripts/create-sync-branch.sh "${{ github.run_id }}"
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Force-create/reset local develop to origin/develop
+          git checkout -B develop origin/develop
+          
+          # Update develop to exactly match upstream/develop
+          git fetch upstream develop --prune
+          git reset --hard upstream/develop
+          
+          # Push updated develop to origin (use force-with-lease to avoid clobbering unseen changes)
+          git push --force-with-lease origin develop || {
+            echo "Push failed, retrying in 2s..."
+            sleep 2
+            git push --force-with-lease origin develop
+          }
+          
+          # Create a sync branch based on upstream/develop
+          SYNC_BRANCH="sync/upstream-${{ github.run_id }}"
+          git checkout -B "$SYNC_BRANCH" origin/develop
+          
+          # Rebase the sync branch onto develop
+          echo "Rebasing $SYNC_BRANCH onto develop"
+          if ! git rebase develop; then
+            echo "Rebase failed — aborting and leaving branch in original state"
+            git rebase --abort || true
+            exit 1
+          fi
+          
+          # Push rebased sync branch to origin
+          git push --force-with-lease origin "$SYNC_BRANCH" || {
+            echo "Push failed, retrying in 2s..."
+            sleep 2
+            git push --force-with-lease origin "$SYNC_BRANCH"
+          }
+          
+          echo "Sync branch $SYNC_BRANCH created and pushed."
 
       - name: Check if sync branch is ahead of develop
         id: check_ahead
