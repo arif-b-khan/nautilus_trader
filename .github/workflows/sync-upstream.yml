@@ -48,6 +48,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
+          # Configure git to use the PAT token for authentication
+          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          
           # Create a sync branch based on upstream/develop
           SYNC_BRANCH="sync/upstream-${{ github.run_id }}"
           git checkout -b "$SYNC_BRANCH" upstream/develop
