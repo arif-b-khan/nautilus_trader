@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.17.2
+#       jupytext_version: 1.17.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -27,6 +27,8 @@ from nautilus_trader.adapters.databento.data_utils import databento_data
 from nautilus_trader.adapters.databento.data_utils import load_catalog
 from nautilus_trader.backtest.config import MarginModelConfig
 from nautilus_trader.backtest.node import BacktestNode
+from nautilus_trader.backtest.option_exercise import OptionExerciseConfig
+from nautilus_trader.backtest.option_exercise import OptionExerciseModule
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestEngineConfig
@@ -151,6 +153,13 @@ class OptionStrategy(Strategy):
     def on_start(self):
         self.bar_type = BarType.from_str(f"{self.config.future_id}-1-MINUTE-LAST-EXTERNAL")
 
+        if not self.config.load_greeks:
+            self.bar_type_2 = BarType.from_str(
+                f"{self.config.future_id}-2-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            )
+        else:
+            self.bar_type_2 = BarType.from_str(f"{self.config.future_id}-2-MINUTE-LAST-EXTERNAL")
+
         self.request_instrument(self.config.option_id)
         self.request_instrument(self.config.option_id2)
         self.request_instrument(self.bar_type.instrument_id)
@@ -159,6 +168,7 @@ class OptionStrategy(Strategy):
         self.subscribe_quote_ticks(self.config.option_id)
         self.subscribe_quote_ticks(self.config.option_id2)
         self.subscribe_bars(self.bar_type)
+        self.subscribe_bars(self.bar_type_2)
 
         # Request spread instrument with ES options tick scheme properties
         self.request_instrument(
@@ -214,7 +224,7 @@ class OptionStrategy(Strategy):
 
     def on_bar(self, bar):
         self.user_log(
-            f"bar ts_init = {unix_nanos_to_iso8601(bar.ts_init)}, bar close = {bar.close}",
+            f"bar ts_init = {unix_nanos_to_iso8601(bar.ts_init)}, bar close = {bar}",
         )
 
         if not self.start_orders_done:
@@ -274,8 +284,8 @@ class OptionStrategy(Strategy):
 # %%
 # BacktestEngineConfig
 
-# When load_greeks is False, the streamed greeks can be saved after the backtest
-# When load_greeks is True, the greeks are loaded from the catalog
+# When load_greeks is False, the streamed greeks and bars can be saved after the backtest to the catalog
+# When load_greeks is True, the greeks and previously internal bars are loaded from the catalog
 load_greeks = False
 
 actors = [
@@ -315,20 +325,21 @@ strategies = [
 streaming = StreamingConfig(
     catalog_path=catalog.path,
     fs_protocol="file",
-    include_types=[GreeksData],
+    include_types=[GreeksData, Bar],
 )
 
 logging = LoggingConfig(
-    log_level="WARNING",
+    log_level="WARNING",  # "DEBUG"
     log_level_file="WARNING",
     log_directory=".",
     log_file_name="databento_option_greeks",
     log_file_format=None,  # "json" or None
-    # log_component_levels={"SpreadQuoteAggregator": "WARNING"},
+    # log_component_levels={"SpreadQuoteAggregator": "DEBUG"},
     bypass_logging=False,
     print_config=False,
     use_pyo3=False,
     clear_log_file=True,
+    # log_components_only=True,
 )
 
 catalogs = [
@@ -392,6 +403,16 @@ margin_model = MarginModelConfig(
     model_type="standard",
 )  # Use standard margin model for options trading
 
+modules = [
+    ImportableActorConfig(
+        actor_path=OptionExerciseModule.fully_qualified_name(),
+        config_path=OptionExerciseConfig.fully_qualified_name(),
+        config={
+            "auto_exercise_enabled": True,
+        },
+    ),
+]
+
 venues = [
     BacktestVenueConfig(
         name="XCME",
@@ -401,6 +422,7 @@ venues = [
         starting_balances=["1_000_000 USD"],
         margin_model=margin_model,
         fill_model=fill_model,
+        modules=modules,
     ),
 ]
 
@@ -426,6 +448,11 @@ if not load_greeks:
     catalog.convert_stream_to_data(
         results[0].instance_id,
         GreeksData,
+    )
+    catalog.convert_stream_to_data(
+        results[0].instance_id,
+        Bar,
+        identifiers=("2-MINUTE",),
     )
 
 # %% [markdown]

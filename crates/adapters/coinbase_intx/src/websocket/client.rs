@@ -27,14 +27,14 @@ use dashmap::DashMap;
 use futures_util::{Stream, StreamExt};
 use nautilus_common::{logging::log_task_stopped, runtime::get_runtime};
 use nautilus_core::{
-    consts::NAUTILUS_USER_AGENT, env::get_env_var, time::get_atomic_clock_realtime,
+    consts::NAUTILUS_USER_AGENT, env::get_or_env_var, time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
     data::{BarType, Data, OrderBookDeltas_API},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
-use nautilus_network::websocket::{Consumer, MessageReader, WebSocketClient, WebSocketConfig};
+use nautilus_network::websocket::{MessageReader, WebSocketClient, WebSocketConfig};
 use reqwest::header::USER_AGENT;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use ustr::Ustr;
@@ -93,9 +93,9 @@ impl CoinbaseIntxWebSocketClient {
         heartbeat: Option<u64>,
     ) -> anyhow::Result<Self> {
         let url = url.unwrap_or(COINBASE_INTX_WS_URL.to_string());
-        let api_key = api_key.unwrap_or(get_env_var("COINBASE_INTX_API_KEY")?);
-        let api_secret = api_secret.unwrap_or(get_env_var("COINBASE_INTX_API_SECRET")?);
-        let api_passphrase = api_passphrase.unwrap_or(get_env_var("COINBASE_INTX_API_PASSPHRASE")?);
+        let api_key = get_or_env_var(api_key, "COINBASE_INTX_API_KEY")?;
+        let api_secret = get_or_env_var(api_secret, "COINBASE_INTX_API_SECRET")?;
+        let api_passphrase = get_or_env_var(api_passphrase, "COINBASE_INTX_API_PASSPHRASE")?;
 
         let credential = Credential::new(api_key, api_secret, api_passphrase);
         let signal = Arc::new(AtomicBool::new(false));
@@ -206,16 +206,9 @@ impl CoinbaseIntxWebSocketClient {
         let config = WebSocketConfig {
             url: self.url.clone(),
             headers: vec![(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())],
-            #[cfg(feature = "python")]
-            handler: Consumer::Python(None),
-            #[cfg(not(feature = "python"))]
-            handler: {
-                let (consumer, _rx) = Consumer::rust_consumer();
-                consumer
-            },
+            message_handler: None, // Will be handled by the returned reader
             heartbeat: self.heartbeat,
             heartbeat_msg: None,
-            #[cfg(feature = "python")]
             ping_handler: None,
             reconnect_timeout_ms: Some(5_000),
             reconnect_delay_initial_ms: None, // Use default
@@ -359,8 +352,8 @@ impl CoinbaseIntxWebSocketClient {
             .map_err(|e| CoinbaseIntxWsError::JsonError(e.to_string()))?;
 
         if let Some(inner) = self.inner.read().await.as_ref() {
-            if let Err(err) = inner.send_text(json_txt, None).await {
-                tracing::error!("Error sending message: {err:?}");
+            if let Err(e) = inner.send_text(json_txt, None).await {
+                tracing::error!("Error sending message: {e:?}");
             }
         } else {
             return Err(CoinbaseIntxWsError::ClientError(
@@ -411,8 +404,8 @@ impl CoinbaseIntxWebSocketClient {
             .map_err(|e| CoinbaseIntxWsError::JsonError(e.to_string()))?;
 
         if let Some(inner) = self.inner.read().await.as_ref() {
-            if let Err(err) = inner.send_text(json_txt, None).await {
-                tracing::error!("Error sending message: {err:?}");
+            if let Err(e) = inner.send_text(json_txt, None).await {
+                tracing::error!("Error sending message: {e:?}");
             }
         } else {
             return Err(CoinbaseIntxWsError::ClientError(

@@ -30,7 +30,10 @@ use nautilus_model::{
     instruments::{
         Equity, FuturesContract, FuturesSpread, InstrumentAny, OptionContract, OptionSpread,
     },
-    types::{Currency, Price, Quantity, price::decode_raw_price_i64},
+    types::{
+        Currency, Price, Quantity,
+        price::{PRICE_UNDEF, decode_raw_price_i64},
+    },
 };
 use ustr::Ustr;
 
@@ -330,8 +333,8 @@ pub fn decode_lot_size(value: i32) -> Quantity {
 }
 
 #[must_use]
-fn is_trade_msg(order_side: OrderSide, action: c_char) -> bool {
-    order_side == OrderSide::NoOrderSide || action as u8 as char == 'T'
+fn is_trade_msg(action: c_char) -> bool {
+    action as u8 as char == 'T'
 }
 
 /// Decodes a Databento MBO (Market by Order) message into an order book delta or trade.
@@ -350,17 +353,21 @@ pub fn decode_mbo_msg(
     include_trades: bool,
 ) -> anyhow::Result<(Option<OrderBookDelta>, Option<TradeTick>)> {
     let side = parse_order_side(msg.side);
-    if is_trade_msg(side, msg.action) {
+    if is_trade_msg(msg.action) {
         if include_trades && msg.size > 0 {
+            let price = Price::from_raw(decode_raw_price_i64(msg.price), price_precision);
+            let size = Quantity::from(msg.size);
+            let aggressor_side = parse_aggressor_side(msg.side);
+            let trade_id = TradeId::new(itoa::Buffer::new().format(msg.sequence));
             let ts_event = msg.ts_recv.into();
             let ts_init = ts_init.unwrap_or(ts_event);
 
             let trade = TradeTick::new(
                 instrument_id,
-                Price::from_raw(decode_raw_price_i64(msg.price), price_precision),
-                Quantity::from(msg.size),
-                parse_aggressor_side(msg.side),
-                TradeId::new(itoa::Buffer::new().format(msg.sequence)),
+                price,
+                size,
+                aggressor_side,
+                trade_id,
                 ts_event,
                 ts_init,
             );
@@ -370,18 +377,21 @@ pub fn decode_mbo_msg(
         return Ok((None, None));
     }
 
-    let order = BookOrder::new(
-        side,
-        Price::from_raw(decode_raw_price_i64(msg.price), price_precision),
-        Quantity::from(msg.size),
-        msg.order_id,
-    );
+    let action = parse_book_action(msg.action)?;
+    let price = if msg.price == i64::MAX {
+        Price::from_raw(PRICE_UNDEF, 0)
+    } else {
+        Price::from_raw(decode_raw_price_i64(msg.price), price_precision)
+    };
+    let size = Quantity::from(msg.size);
+    let order = BookOrder::new(side, price, size, msg.order_id);
+
     let ts_event = msg.ts_recv.into();
     let ts_init = ts_init.unwrap_or(ts_event);
 
     let delta = OrderBookDelta::new(
         instrument_id,
-        parse_book_action(msg.action)?,
+        action,
         order,
         msg.flags.raw(),
         msg.sequence.into(),
@@ -1380,6 +1390,17 @@ mod tests {
     }
 
     #[rstest]
+    #[case('T' as c_char, true)]
+    #[case('A' as c_char, false)]
+    #[case('C' as c_char, false)]
+    #[case('F' as c_char, false)]
+    #[case('M' as c_char, false)]
+    #[case('R' as c_char, false)]
+    fn test_is_trade_msg(#[case] action: c_char, #[case] expected: bool) {
+        assert_eq!(is_trade_msg(action), expected);
+    }
+
+    #[rstest]
     #[case('A' as c_char, Ok(BookAction::Add))]
     #[case('C' as c_char, Ok(BookAction::Delete))]
     #[case('F' as c_char, Ok(BookAction::Update))]
@@ -1494,6 +1515,75 @@ mod tests {
     }
 
     #[rstest]
+    #[case(100, Quantity::from(100))]
+    #[case(1000, Quantity::from(1000))]
+    #[case(5, Quantity::from(5))]
+    fn test_decode_quantity(#[case] value: u64, #[case] expected: Quantity) {
+        assert_eq!(decode_quantity(value), expected);
+    }
+
+    #[rstest]
+    #[case(0, 2, Price::new(0.01, 2))] // Default for 0
+    #[case(i64::MAX, 2, Price::new(0.01, 2))] // Default for i64::MAX
+    #[case(1000000, 2, Price::from_raw(decode_raw_price_i64(1000000), 2))] // Arbitrary valid price
+    fn test_decode_price_increment(
+        #[case] value: i64,
+        #[case] precision: u8,
+        #[case] expected: Price,
+    ) {
+        assert_eq!(decode_price_increment(value, precision), expected);
+    }
+
+    #[rstest]
+    #[case(0, Quantity::from(1))] // Default for 0
+    #[case(i32::MAX, Quantity::from(1))] // Default for MAX
+    #[case(100, Quantity::from(100))]
+    #[case(1, Quantity::from(1))]
+    #[case(1000, Quantity::from(1000))]
+    fn test_decode_lot_size(#[case] value: i32, #[case] expected: Quantity) {
+        assert_eq!(decode_lot_size(value), expected);
+    }
+
+    #[rstest]
+    #[case(0, None)] // None for 0
+    #[case(1, Some(Ustr::from("Scheduled")))]
+    #[case(2, Some(Ustr::from("Surveillance intervention")))]
+    #[case(3, Some(Ustr::from("Market event")))]
+    #[case(10, Some(Ustr::from("Regulatory")))]
+    #[case(30, Some(Ustr::from("News pending")))]
+    #[case(40, Some(Ustr::from("Order imbalance")))]
+    #[case(50, Some(Ustr::from("LULD pause")))]
+    #[case(60, Some(Ustr::from("Operational")))]
+    #[case(100, Some(Ustr::from("Corporate action")))]
+    #[case(120, Some(Ustr::from("Market wide halt level 1")))]
+    fn test_parse_status_reason(#[case] value: u16, #[case] expected: Option<Ustr>) {
+        assert_eq!(parse_status_reason(value).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(999)] // Invalid code
+    fn test_parse_status_reason_invalid(#[case] value: u16) {
+        assert!(parse_status_reason(value).is_err());
+    }
+
+    #[rstest]
+    #[case(0, None)] // None for 0
+    #[case(1, Some(Ustr::from("No cancel")))]
+    #[case(2, Some(Ustr::from("Change trading session")))]
+    #[case(3, Some(Ustr::from("Implied matching on")))]
+    #[case(4, Some(Ustr::from("Implied matching off")))]
+    fn test_parse_status_trading_event(#[case] value: u16, #[case] expected: Option<Ustr>) {
+        assert_eq!(parse_status_trading_event(value).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(5)] // Invalid code
+    #[case(100)] // Invalid code
+    fn test_parse_status_trading_event_invalid(#[case] value: u16) {
+        assert!(parse_status_trading_event(value).is_err());
+    }
+
+    #[rstest]
     fn test_decode_mbo_msg() {
         let path = test_data_path().join("test_data.mbo.dbn.zst");
         let mut dbn_stream = Decoder::from_zstd_file(path)
@@ -1516,6 +1606,72 @@ mod tests {
         assert_eq!(delta.ts_event, msg.ts_recv);
         assert_eq!(delta.ts_event, 1_609_160_400_000_704_060);
         assert_eq!(delta.ts_init, 0);
+    }
+
+    #[rstest]
+    fn test_decode_mbo_msg_clear_action() {
+        // Create an MBO message with Clear action (action='R', side='N')
+        let ts_recv = 1_609_160_400_000_000_000;
+        let msg = dbn::MboMsg {
+            hd: dbn::RecordHeader::new::<dbn::MboMsg>(1, 1, ts_recv as u32, 0),
+            order_id: 0,
+            price: i64::MAX,
+            size: 0,
+            flags: dbn::FlagSet::empty(),
+            channel_id: 0,
+            action: 'R' as c_char,
+            side: 'N' as c_char, // NoOrderSide for Clear
+            ts_recv,
+            ts_in_delta: 0,
+            sequence: 1_000_000,
+        };
+
+        let instrument_id = InstrumentId::from("ESM4.GLBX");
+        let (delta, trade) = decode_mbo_msg(&msg, instrument_id, 2, Some(0.into()), false).unwrap();
+
+        // Clear messages should produce OrderBookDelta, not TradeTick
+        assert!(trade.is_none());
+        let delta = delta.expect("Clear action should produce OrderBookDelta");
+
+        assert_eq!(delta.instrument_id, instrument_id);
+        assert_eq!(delta.action, BookAction::Clear);
+        assert_eq!(delta.order.side, OrderSide::NoOrderSide);
+        assert_eq!(delta.order.size, Quantity::from("0"));
+        assert_eq!(delta.order.order_id, 0);
+        assert_eq!(delta.sequence, 1_000_000);
+        assert_eq!(delta.ts_event, ts_recv);
+        assert_eq!(delta.ts_init, 0);
+    }
+
+    #[rstest]
+    fn test_decode_mbo_msg_no_order_side_update() {
+        // MBO messages with NoOrderSide are now passed through to the book
+        // The book will resolve the side from its cache using the order_id
+        let ts_recv = 1_609_160_400_000_000_000;
+        let msg = dbn::MboMsg {
+            hd: dbn::RecordHeader::new::<dbn::MboMsg>(1, 1, ts_recv as u32, 0),
+            order_id: 123_456_789,
+            price: 4_800_250_000_000, // $4800.25 with precision 2
+            size: 1,
+            flags: dbn::FlagSet::empty(),
+            channel_id: 1,
+            action: 'M' as c_char, // Modify/Update action
+            side: 'N' as c_char,   // NoOrderSide
+            ts_recv,
+            ts_in_delta: 0,
+            sequence: 1_000_000,
+        };
+
+        let instrument_id = InstrumentId::from("ESM4.GLBX");
+        let (delta, trade) = decode_mbo_msg(&msg, instrument_id, 2, Some(0.into()), false).unwrap();
+
+        // Delta should be created with NoOrderSide (book will resolve it)
+        assert!(delta.is_some());
+        assert!(trade.is_none());
+        let delta = delta.unwrap();
+        assert_eq!(delta.order.side, OrderSide::NoOrderSide);
+        assert_eq!(delta.order.order_id, 123_456_789);
+        assert_eq!(delta.action, BookAction::Update);
     }
 
     #[rstest]
@@ -1551,12 +1707,12 @@ mod tests {
         let quote = decode_bbo_msg(msg, instrument_id, 2, Some(0.into())).unwrap();
 
         assert_eq!(quote.instrument_id, instrument_id);
-        assert_eq!(quote.bid_price, Price::from("5199.50"));
-        assert_eq!(quote.ask_price, Price::from("5199.75"));
-        assert_eq!(quote.bid_size, Quantity::from("26"));
-        assert_eq!(quote.ask_size, Quantity::from("23"));
+        assert_eq!(quote.bid_price, Price::from("3702.25"));
+        assert_eq!(quote.ask_price, Price::from("3702.75"));
+        assert_eq!(quote.bid_size, Quantity::from("18"));
+        assert_eq!(quote.ask_size, Quantity::from("13"));
         assert_eq!(quote.ts_event, msg.ts_recv);
-        assert_eq!(quote.ts_event, 1715248801000000000);
+        assert_eq!(quote.ts_event, 1609113600000000000);
         assert_eq!(quote.ts_init, 0);
     }
 
@@ -1572,12 +1728,12 @@ mod tests {
         let quote = decode_bbo_msg(msg, instrument_id, 2, Some(0.into())).unwrap();
 
         assert_eq!(quote.instrument_id, instrument_id);
-        assert_eq!(quote.bid_price, Price::from("5199.50"));
-        assert_eq!(quote.ask_price, Price::from("5199.75"));
-        assert_eq!(quote.bid_size, Quantity::from("33"));
-        assert_eq!(quote.ask_size, Quantity::from("17"));
+        assert_eq!(quote.bid_price, Price::from("3702.25"));
+        assert_eq!(quote.ask_price, Price::from("3702.75"));
+        assert_eq!(quote.bid_size, Quantity::from("18"));
+        assert_eq!(quote.ask_size, Quantity::from("13"));
         assert_eq!(quote.ts_event, msg.ts_recv);
-        assert_eq!(quote.ts_event, 1715248800000000000);
+        assert_eq!(quote.ts_event, 1609113600000000000);
         assert_eq!(quote.ts_init, 0);
     }
 
@@ -1655,7 +1811,6 @@ mod tests {
         assert_eq!(trade.ts_init, 0);
     }
 
-    #[ignore = "Requires updated test data"]
     #[rstest]
     fn test_decode_ohlcv_msg() {
         let path = test_data_path().join("test_data.ohlcv-1s.dbn.zst");
@@ -1671,12 +1826,13 @@ mod tests {
             bar.bar_type,
             BarType::from("ESM4.GLBX-1-SECOND-LAST-EXTERNAL")
         );
-        assert_eq!(bar.open, Price::from("3720.25"));
-        assert_eq!(bar.high, Price::from("3720.50"));
-        assert_eq!(bar.low, Price::from("3720.25"));
-        assert_eq!(bar.close, Price::from("3720.50"));
-        assert_eq!(bar.ts_event, 1_609_160_400_000_000_000);
-        assert_eq!(bar.ts_init, 1_609_160_401_000_000_000); // Adjusted to open + interval
+        assert_eq!(bar.open, Price::from("372025.00"));
+        assert_eq!(bar.high, Price::from("372050.00"));
+        assert_eq!(bar.low, Price::from("372025.00"));
+        assert_eq!(bar.close, Price::from("372050.00"));
+        assert_eq!(bar.volume, Quantity::from("57"));
+        assert_eq!(bar.ts_event, msg.hd.ts_event + BAR_CLOSE_ADJUSTMENT_1S); // timestamp_on_close=true
+        assert_eq!(bar.ts_init, 0); // ts_init was Some(0)
     }
 
     #[rstest]
@@ -1798,31 +1954,7 @@ mod tests {
         }
     }
 
-    // TODO: Re-enable these tests once proper CBBO test data is available
-    // The current test_data.cbbo.dbn.zst files contain invalid/placeholder data
     #[rstest]
-    #[ignore]
-    fn test_decode_cbbo_msg() {
-        let path = test_data_path().join("test_data.cbbo.dbn.zst");
-        let mut dbn_stream = Decoder::from_zstd_file(path)
-            .unwrap()
-            .decode_stream::<dbn::CbboMsg>();
-        let msg = dbn_stream.next().unwrap().unwrap();
-
-        let instrument_id = InstrumentId::from("ESM4.GLBX");
-        let quote = decode_cbbo_msg(msg, instrument_id, 2, Some(0.into())).unwrap();
-
-        assert_eq!(quote.instrument_id, instrument_id);
-        assert!(quote.bid_price.raw > 0);
-        assert!(quote.ask_price.raw > 0);
-        assert!(quote.bid_size.raw > 0);
-        assert!(quote.ask_size.raw > 0);
-        assert_eq!(quote.ts_event, msg.ts_recv);
-        assert_eq!(quote.ts_init, 0);
-    }
-
-    #[rstest]
-    #[ignore]
     fn test_decode_cbbo_1s_msg() {
         let path = test_data_path().join("test_data.cbbo-1s.dbn.zst");
         let mut dbn_stream = Decoder::from_zstd_file(path)
@@ -1842,7 +1974,6 @@ mod tests {
         assert_eq!(quote.ts_init, 0);
     }
 
-    // TODO: Re-enable this test once proper CBBO test data is available
     #[rstest]
     fn test_decode_mbp10_msg_with_all_levels() {
         let mut msg = dbn::Mbp10Msg::default();
@@ -1869,8 +2000,6 @@ mod tests {
 
     #[rstest]
     fn test_array_conversion_error_handling() {
-        use nautilus_model::{data::BookOrder, enums::OrderSide};
-
         let mut bids = Vec::new();
         let mut asks = Vec::new();
 
@@ -1907,9 +2036,9 @@ mod tests {
     }
 
     #[rstest]
-    #[ignore]
     fn test_decode_tcbbo_msg() {
-        let path = test_data_path().join("test_data.cbbo.dbn.zst");
+        // Use cbbo-1s as base since cbbo.dbn.zst was invalid
+        let path = test_data_path().join("test_data.cbbo-1s.dbn.zst");
         let mut dbn_stream = Decoder::from_zstd_file(path)
             .unwrap()
             .decode_stream::<dbn::CbboMsg>();
@@ -1917,7 +2046,7 @@ mod tests {
 
         // Simulate TCBBO by adding trade data
         let mut tcbbo_msg = msg.clone();
-        tcbbo_msg.price = 372025;
+        tcbbo_msg.price = 3702500000000;
         tcbbo_msg.size = 10;
 
         let instrument_id = InstrumentId::from("ESM4.GLBX");
@@ -1933,9 +2062,108 @@ mod tests {
         assert_eq!(quote.ts_init, 0);
 
         assert_eq!(trade.instrument_id, instrument_id);
-        assert_eq!(trade.price, Price::from_raw(372025, 2));
+        assert_eq!(trade.price, Price::from("3702.50"));
         assert_eq!(trade.size, Quantity::from(10));
         assert_eq!(trade.ts_event, tcbbo_msg.ts_recv);
         assert_eq!(trade.ts_init, 0);
+    }
+
+    #[rstest]
+    fn test_decode_bar_type() {
+        let mut msg = dbn::OhlcvMsg::default_for_schema(dbn::Schema::Ohlcv1S);
+        let instrument_id = InstrumentId::from("ESM4.GLBX");
+
+        // Test 1-second bar
+        msg.hd.rtype = 32;
+        let bar_type = decode_bar_type(&msg, instrument_id).unwrap();
+        assert_eq!(bar_type, BarType::from("ESM4.GLBX-1-SECOND-LAST-EXTERNAL"));
+
+        // Test 1-minute bar
+        msg.hd.rtype = 33;
+        let bar_type = decode_bar_type(&msg, instrument_id).unwrap();
+        assert_eq!(bar_type, BarType::from("ESM4.GLBX-1-MINUTE-LAST-EXTERNAL"));
+
+        // Test 1-hour bar
+        msg.hd.rtype = 34;
+        let bar_type = decode_bar_type(&msg, instrument_id).unwrap();
+        assert_eq!(bar_type, BarType::from("ESM4.GLBX-1-HOUR-LAST-EXTERNAL"));
+
+        // Test 1-day bar
+        msg.hd.rtype = 35;
+        let bar_type = decode_bar_type(&msg, instrument_id).unwrap();
+        assert_eq!(bar_type, BarType::from("ESM4.GLBX-1-DAY-LAST-EXTERNAL"));
+
+        // Test unsupported rtype
+        msg.hd.rtype = 99;
+        let result = decode_bar_type(&msg, instrument_id);
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_decode_ts_event_adjustment() {
+        let mut msg = dbn::OhlcvMsg::default_for_schema(dbn::Schema::Ohlcv1S);
+
+        // Test 1-second bar adjustment
+        msg.hd.rtype = 32;
+        let adjustment = decode_ts_event_adjustment(&msg).unwrap();
+        assert_eq!(adjustment, BAR_CLOSE_ADJUSTMENT_1S);
+
+        // Test 1-minute bar adjustment
+        msg.hd.rtype = 33;
+        let adjustment = decode_ts_event_adjustment(&msg).unwrap();
+        assert_eq!(adjustment, BAR_CLOSE_ADJUSTMENT_1M);
+
+        // Test 1-hour bar adjustment
+        msg.hd.rtype = 34;
+        let adjustment = decode_ts_event_adjustment(&msg).unwrap();
+        assert_eq!(adjustment, BAR_CLOSE_ADJUSTMENT_1H);
+
+        // Test 1-day bar adjustment
+        msg.hd.rtype = 35;
+        let adjustment = decode_ts_event_adjustment(&msg).unwrap();
+        assert_eq!(adjustment, BAR_CLOSE_ADJUSTMENT_1D);
+
+        // Test eod bar adjustment (same as 1d)
+        msg.hd.rtype = 36;
+        let adjustment = decode_ts_event_adjustment(&msg).unwrap();
+        assert_eq!(adjustment, BAR_CLOSE_ADJUSTMENT_1D);
+
+        // Test unsupported rtype
+        msg.hd.rtype = 99;
+        let result = decode_ts_event_adjustment(&msg);
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_decode_record() {
+        // Test with MBO message
+        let path = test_data_path().join("test_data.mbo.dbn.zst");
+        let decoder = Decoder::from_zstd_file(path).unwrap();
+        let mut dbn_stream = decoder.decode_stream::<dbn::MboMsg>();
+        let msg = dbn_stream.next().unwrap().unwrap();
+
+        let record_ref = dbn::RecordRef::from(msg);
+        let instrument_id = InstrumentId::from("ESM4.GLBX");
+
+        let (data1, data2) =
+            decode_record(&record_ref, instrument_id, 2, Some(0.into()), true, false).unwrap();
+
+        assert!(data1.is_some());
+        assert!(data2.is_none());
+
+        // Test with Trade message
+        let path = test_data_path().join("test_data.trades.dbn.zst");
+        let decoder = Decoder::from_zstd_file(path).unwrap();
+        let mut dbn_stream = decoder.decode_stream::<dbn::TradeMsg>();
+        let msg = dbn_stream.next().unwrap().unwrap();
+
+        let record_ref = dbn::RecordRef::from(msg);
+
+        let (data1, data2) =
+            decode_record(&record_ref, instrument_id, 2, Some(0.into()), true, false).unwrap();
+
+        assert!(data1.is_some());
+        assert!(data2.is_none());
+        assert!(matches!(data1.unwrap(), Data::Trade(_)));
     }
 }

@@ -48,7 +48,7 @@ def parse_order_side(order_side: PolymarketOrderSide) -> OrderSide:
             raise ValueError(f"invalid order side, was {order_side}")
 
 
-def parse_liquidity_side(liquidity_side: PolymarketLiquiditySide) -> OrderSide:
+def parse_liquidity_side(liquidity_side: PolymarketLiquiditySide) -> LiquiditySide:
     match liquidity_side:
         case PolymarketLiquiditySide.MAKER:
             return LiquiditySide.MAKER
@@ -59,7 +59,7 @@ def parse_liquidity_side(liquidity_side: PolymarketLiquiditySide) -> OrderSide:
             raise ValueError(f"invalid liquidity side, was {liquidity_side}")
 
 
-def parse_time_in_force(order_type: PolymarketOrderType) -> OrderSide:
+def parse_time_in_force(order_type: PolymarketOrderType) -> TimeInForce:
     match order_type:
         case PolymarketOrderType.GTC:
             return TimeInForce.GTC
@@ -67,6 +67,8 @@ def parse_time_in_force(order_type: PolymarketOrderType) -> OrderSide:
             return TimeInForce.GTD
         case PolymarketOrderType.FOK:
             return TimeInForce.FOK
+        case PolymarketOrderType.FAK:
+            return TimeInForce.IOC
         case _:
             # Theoretically unreachable but retained to keep the match exhaustive
             raise ValueError(f"invalid order type, was {order_type}")
@@ -74,11 +76,11 @@ def parse_time_in_force(order_type: PolymarketOrderType) -> OrderSide:
 
 def parse_order_status(order_status: PolymarketOrderStatus) -> OrderStatus:
     match order_status:
-        case PolymarketOrderStatus.UNMATCHED:
+        case PolymarketOrderStatus.INVALID | PolymarketOrderStatus.UNMATCHED:
             return OrderStatus.REJECTED
         case PolymarketOrderStatus.LIVE | PolymarketOrderStatus.DELAYED:
             return OrderStatus.ACCEPTED
-        case PolymarketOrderStatus.CANCELED:
+        case PolymarketOrderStatus.CANCELED | PolymarketOrderStatus.CANCELED_MARKET_RESOLVED:
             return OrderStatus.CANCELED
         case PolymarketOrderStatus.MATCHED:
             return OrderStatus.FILLED
@@ -103,7 +105,8 @@ def parse_instrument(
     if end_date_iso:
         expiration_ns = pd.Timestamp(end_date_iso).value
     else:
-        expiration_ns = 0
+        # end_date_iso can be missing in some conditions that are part of an event that has it
+        expiration_ns = (pd.Timestamp.now(tz="UTC") + pd.DateOffset(years=10)).value
 
     maker_fee = Decimal(str(market_info["maker_base_fee"]))
     taker_fee = Decimal(str(market_info["taker_base_fee"]))

@@ -53,6 +53,10 @@ class DockerizedIBGatewayConfig(NautilusConfig, frozen=True):
         The timeout (seconds) for trying to launch IBG docker container when start=True.
     container_image: str, optional
         The reference to the container image used by the IB Gateway.
+    vnc_port: int | None, optional, default None
+        The VNC port for the container. Set to None to disable VNC access.
+        The VNC server provides remote desktop access to the IB Gateway interface.
+        Examples: 5900, 5901, 5902, etc.
 
     """
 
@@ -62,6 +66,7 @@ class DockerizedIBGatewayConfig(NautilusConfig, frozen=True):
     read_only_api: bool = True
     timeout: int = 300
     container_image: str = "ghcr.io/gnzsnz/ib-gateway:stable"
+    vnc_port: int | None = None
 
     def __repr__(self):
         masked_username = self._mask_sensitive_info(self.username)
@@ -131,6 +136,10 @@ class InteractiveBrokersInstrumentProviderConfig(InstrumentProviderConfig, froze
         Example: value set to 1, InstrumentProvider will make fresh pull every day even if TradingNode is not restarted.
     pickle_path: str (default: None)
         If provided valid path, will store the ContractDetails as pickle, and use during cache_validity period.
+    filter_sec_types: FrozenSet[str], optional
+        A set of IB `secType` values which should be ignored by the provider. Any contract whose
+        `secType` matches one of these entries will be skipped with a warning before reconciliation is
+        attempted. Use this to opt out from assets that are not yet supported (for example `WAR` or `IOPT`).
 
     """
 
@@ -145,6 +154,7 @@ class InteractiveBrokersInstrumentProviderConfig(InstrumentProviderConfig, froze
             and self.max_expiry_days == other.max_expiry_days
             and self.build_options_chain == other.build_options_chain
             and self.build_futures_chain == other.build_futures_chain
+            and self.filter_sec_types == other.filter_sec_types
         )
 
     def __hash__(self) -> int:
@@ -165,6 +175,7 @@ class InteractiveBrokersInstrumentProviderConfig(InstrumentProviderConfig, froze
                 ),
                 self.cache_validity_days,
                 self.pickle_path,
+                self.filter_sec_types,
             ),
         )
 
@@ -179,6 +190,7 @@ class InteractiveBrokersInstrumentProviderConfig(InstrumentProviderConfig, froze
 
     cache_validity_days: int | None = None
     pickle_path: str | None = None
+    filter_sec_types: frozenset[str] = frozenset()
 
 
 class InteractiveBrokersDataClientConfig(LiveDataClientConfig, frozen=True):
@@ -248,6 +260,13 @@ class InteractiveBrokersExecClientConfig(LiveExecClientConfig, frozen=True):
         The client's gateway container configuration.
     connection_timeout : int, default 300
         The timeout (seconds) to wait for the client connection to be established.
+    fetch_all_open_orders : bool, default False
+        If True, uses reqAllOpenOrders to fetch orders from all API clients and TWS GUI.
+        If False, uses reqOpenOrders to fetch only orders from current client ID session.
+        Note: When using reqAllOpenOrders with client ID 0, it can see orders from all
+        sources including TWS GUI, but cannot see orders from other non-zero client IDs.
+    track_option_exercise_from_position_update : bool, default False
+        If True, subscribes to real-time position updates to track option exercises.
 
     """
 
@@ -260,3 +279,5 @@ class InteractiveBrokersExecClientConfig(LiveExecClientConfig, frozen=True):
     account_id: str | None = None
     dockerized_gateway: DockerizedIBGatewayConfig | None = None
     connection_timeout: int = 300
+    fetch_all_open_orders: bool = False
+    track_option_exercise_from_position_update: bool = False

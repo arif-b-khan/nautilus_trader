@@ -15,8 +15,10 @@
 
 //! Python bindings from `pyo3`.
 
+pub mod canceller;
 pub mod enums;
 pub mod http;
+pub mod urls;
 pub mod websocket;
 
 use pyo3::prelude::*;
@@ -31,8 +33,12 @@ pub fn bitmex(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BITMEX_HTTP_URL", crate::common::consts::BITMEX_HTTP_URL)?;
     m.add("BITMEX_WS_URL", crate::common::consts::BITMEX_WS_URL)?;
     m.add_class::<crate::common::enums::BitmexSymbolStatus>()?;
+    m.add_class::<crate::common::enums::BitmexPositionSide>()?;
     m.add_class::<crate::http::client::BitmexHttpClient>()?;
     m.add_class::<crate::websocket::BitmexWebSocketClient>()?;
+    m.add_class::<crate::execution::canceller::CancelBroadcaster>()?;
+    m.add_function(wrap_pyfunction!(urls::get_bitmex_http_base_url, m)?)?;
+    m.add_function(wrap_pyfunction!(urls::get_bitmex_ws_url, m)?)?;
 
     Ok(())
 }

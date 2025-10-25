@@ -43,13 +43,24 @@
 #![deny(nonstandard_style)]
 #![deny(missing_debug_implementations)]
 // #![deny(clippy::missing_errors_doc)]
-// #![deny(clippy::missing_panics_doc)]
+#![deny(clippy::missing_panics_doc)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod common;
 pub mod config;
+pub mod data;
+pub mod execution;
 pub mod http;
+pub mod signing;
 pub mod websocket;
 
 #[cfg(feature = "python")]
 pub mod python;
+
+pub use crate::{
+    config::{HyperliquidDataClientConfig, HyperliquidExecClientConfig},
+    data::HyperliquidDataClient,
+    execution::HyperliquidExecutionClient,
+    http::client::HyperliquidHttpClient,
+    websocket::client::HyperliquidWebSocketClient,
+};

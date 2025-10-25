@@ -126,7 +126,7 @@ class BybitMarketHttpAPI:
         Fetch all instruments with pagination from Bybit.
         """
         all_instruments: list[BybitInstrument] = []
-        current_cursor = None
+        cursor = None
 
         while True:
             response = await self._endpoint_instruments.get(
@@ -136,13 +136,13 @@ class BybitMarketHttpAPI:
                     status=status,
                     baseCoin=base_coin,
                     limit=1000,
-                    cursor=current_cursor,
+                    cursor=cursor,
                 ),
             )
             all_instruments.extend(response.result.list)
-            current_cursor = response.result.nextPageCursor
+            cursor = response.result.nextPageCursor
 
-            if not current_cursor or current_cursor == "":
+            if not cursor or cursor == "":
                 break
 
         if product_type == BybitProductType.SPOT:
@@ -208,7 +208,6 @@ class BybitMarketHttpAPI:
     async def request_bybit_trades(
         self,
         instrument_id: InstrumentId,
-        ts_init: int,
         limit: int = 1000,
     ) -> list[Bar]:
         bybit_symbol = BybitSymbol(instrument_id.symbol.value)
@@ -217,14 +216,13 @@ class BybitMarketHttpAPI:
             product_type=bybit_symbol.product_type,
             limit=limit,
         )
-        trade_ticks: list[TradeTick] = [t.parse_to_trade(instrument_id, ts_init) for t in trades]
+        trade_ticks: list[TradeTick] = [t.parse_to_trade(instrument_id) for t in trades]
         return trade_ticks
 
     async def request_bybit_bars(
         self,
         bar_type: BarType,
         interval: BybitKlineInterval,
-        ts_init: int,
         timestamp_on_close: bool,
         limit: int | None = None,
         start: int | None = None,
@@ -256,7 +254,7 @@ class BybitMarketHttpAPI:
 
             klines.sort(key=lambda k: int(k.startTime))
             new_bars = [
-                kline.parse_to_bar(bar_type, ts_init, timestamp_on_close)
+                kline.parse_to_bar(bar_type, timestamp_on_close)
                 for kline in klines
                 if int(kline.startTime) not in seen_timestamps
             ]

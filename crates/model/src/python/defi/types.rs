@@ -37,6 +37,28 @@ impl Chain {
         Self::new(name, chain_id)
     }
 
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain_id.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self == other,
+            CompareOp::Ne => self != other,
+            _ => panic!("Unsupported comparison for Chain"),
+        }
+    }
+
     #[getter]
     #[pyo3(name = "name")]
     fn py_name(&self) -> Blockchain {
@@ -74,7 +96,7 @@ impl Chain {
 
     #[staticmethod]
     #[pyo3(name = "from_chain_name")]
-    fn py_from_chain_name(chain_name: &str) -> PyResult<Chain> {
+    fn py_from_chain_name(chain_name: &str) -> PyResult<Self> {
         Self::from_chain_name(chain_name).cloned().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "`chain_name` '{chain_name}' is not recognized",
@@ -84,36 +106,14 @@ impl Chain {
 
     #[staticmethod]
     #[pyo3(name = "from_chain_id")]
-    fn py_from_chain_id(chain_id: u32) -> Option<Chain> {
+    fn py_from_chain_id(chain_id: u32) -> Option<Self> {
         Self::from_chain_id(chain_id).cloned()
     }
 
     #[staticmethod]
     #[pyo3(name = "ARBITRUM")]
-    fn py_arbitrum_chain() -> Chain {
+    fn py_arbitrum_chain() -> Self {
         chains::ARBITRUM.clone()
-    }
-
-    fn __str__(&self) -> String {
-        self.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("{self:?}")
-    }
-
-    fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.chain_id.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
-        match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for Chain"),
-        }
     }
 }
 
@@ -129,6 +129,29 @@ impl Token {
     ) -> PyResult<Self> {
         let address = address.parse().map_err(to_pyvalue_err)?;
         Ok(Self::new(Arc::new(chain), address, name, symbol, decimals))
+    }
+
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain.chain_id.hash(&mut hasher);
+        self.address.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self == other,
+            CompareOp::Ne => self != other,
+            _ => panic!("Unsupported comparison for Token"),
+        }
     }
 
     #[getter]
@@ -160,29 +183,6 @@ impl Token {
     fn py_decimals(&self) -> u8 {
         self.decimals
     }
-
-    fn __str__(&self) -> String {
-        self.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("{self:?}")
-    }
-
-    fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.chain.chain_id.hash(&mut hasher);
-        self.address.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
-        match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for Token"),
-        }
-    }
 }
 
 #[pymethods]
@@ -195,10 +195,11 @@ impl Dex {
         factory: String,
         factory_creation_block: u64,
         amm_type: String,
-        pool_created_event: String,
-        swap_event: String,
-        mint_event: String,
-        burn_event: String,
+        pool_created_event: &str,
+        swap_event: &str,
+        mint_event: &str,
+        burn_event: &str,
+        collect_event: &str,
     ) -> PyResult<Self> {
         let amm_type = AmmType::from_str(&amm_type).map_err(to_pyvalue_err)?;
         let dex_type = DexType::from_dex_name(&name)
@@ -206,14 +207,39 @@ impl Dex {
         Ok(Self::new(
             chain,
             dex_type,
-            factory,
+            &factory,
             factory_creation_block,
             amm_type,
             pool_created_event,
             swap_event,
             mint_event,
             burn_event,
+            collect_event,
         ))
+    }
+
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain.chain_id.hash(&mut hasher);
+        self.name.hash(&mut hasher);
+        self.factory.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self == other,
+            CompareOp::Ne => self != other,
+            _ => panic!("Unsupported comparison for Dex"),
+        }
     }
 
     #[getter]
@@ -230,8 +256,8 @@ impl Dex {
 
     #[getter]
     #[pyo3(name = "factory")]
-    fn py_factory(&self) -> &str {
-        &self.factory
+    fn py_factory(&self) -> String {
+        self.factory.to_string()
     }
 
     #[getter]
@@ -269,30 +295,6 @@ impl Dex {
     fn py_amm_type(&self) -> AmmType {
         self.amm_type
     }
-
-    fn __str__(&self) -> String {
-        self.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("{self:?}")
-    }
-
-    fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.chain.chain_id.hash(&mut hasher);
-        self.name.hash(&mut hasher);
-        self.factory.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
-        match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for Dex"),
-        }
-    }
 }
 
 #[pymethods]
@@ -322,6 +324,29 @@ impl Pool {
             tick_spacing,
             ts_init.into(),
         ))
+    }
+
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain.chain_id.hash(&mut hasher);
+        self.address.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self == other,
+            CompareOp::Ne => self != other,
+            _ => panic!("Unsupported comparison for Pool"),
+        }
     }
 
     #[getter]
@@ -382,28 +407,5 @@ impl Pool {
     #[pyo3(name = "ts_init")]
     fn py_ts_init(&self) -> u64 {
         self.ts_init.as_u64()
-    }
-
-    fn __str__(&self) -> String {
-        self.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("{self:?}")
-    }
-
-    fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.chain.chain_id.hash(&mut hasher);
-        self.address.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
-        match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for Pool"),
-        }
     }
 }

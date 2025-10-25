@@ -615,6 +615,20 @@ class TestBarType:
         # Assert
         assert expected == bar_type
 
+    def test_bar_type_from_str_with_utf8_symbol(self):
+        # Arrange
+        non_ascii_instrument = "TËST-PÉRP.BINANCE"
+        non_ascii_bar_type = "TËST-PÉRP.BINANCE-1-MINUTE-LAST-EXTERNAL"
+
+        # Act
+        bar_type = BarType.from_str(non_ascii_bar_type)
+
+        # Assert
+        assert bar_type.instrument_id == InstrumentId.from_str(non_ascii_instrument)
+        assert bar_type.spec == BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
+        assert bar_type.aggregation_source == AggregationSource.EXTERNAL
+        assert str(bar_type) == non_ascii_bar_type
+
     def test_properties(self):
         # Arrange, Act
         instrument_id = InstrumentId(Symbol("AUD/USD"), Venue("SIM"))
@@ -812,18 +826,20 @@ class TestBar:
 
     def test_from_raw_returns_expected_bar(self):
         # Arrange
+        bar_type = BarType.from_str("EUR/USD.IDEALPRO-5-MINUTE-MID-EXTERNAL")
         open_price = 1.06210
         high_price = 1.06355
         low_price = 1.06205
         close_price = 1.06320
+        precision = 5
 
         raw_bar = [
-            BarType.from_str("EUR/USD.IDEALPRO-5-MINUTE-MID-EXTERNAL"),
-            convert_to_raw_int(open_price, 5),
-            convert_to_raw_int(high_price, 5),
-            convert_to_raw_int(low_price, 5),
-            convert_to_raw_int(close_price, 5),
-            5,
+            bar_type,
+            convert_to_raw_int(open_price, precision),
+            convert_to_raw_int(high_price, precision),
+            convert_to_raw_int(low_price, precision),
+            convert_to_raw_int(close_price, precision),
+            precision,
             convert_to_raw_int(100_000, 0),
             0,
             1672012800000000000,
@@ -834,16 +850,14 @@ class TestBar:
         result = Bar.from_raw(*raw_bar)
 
         # Assert
-        assert result == Bar(
-            BarType.from_str("EUR/USD.IDEALPRO-5-MINUTE-MID-EXTERNAL"),
-            Price.from_str("1.06210"),
-            Price.from_str("1.06355"),
-            Price.from_str("1.06205"),
-            Price.from_str("1.06320"),
-            Quantity.from_int(100_000),
-            1672012800000000000,
-            1672013100300000000,
-        )
+        assert result.bar_type == bar_type
+        assert result.volume == Quantity.from_int(100_000)
+        assert result.open.raw == raw_bar[1]
+        assert result.high.raw == raw_bar[2]
+        assert result.low.raw == raw_bar[3]
+        assert result.close.raw == raw_bar[4]
+        assert result.ts_event == 1672012800000000000
+        assert result.ts_init == 1672013100300000000
 
     def test_from_dict_returns_expected_bar(self):
         # Arrange
