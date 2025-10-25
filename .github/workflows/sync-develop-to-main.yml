@@ -1,0 +1,72 @@
+name: Sync develop to main
+
+on:
+  schedule:
+    - cron: '30 2 * * *'   # daily at 02:30 UTC (30 mins after upstream sync)
+  workflow_dispatch:
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if PR already exists
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for existing open PR from develop to main
+          EXISTING_PR=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if develop is ahead of main
+        id: check_ahead
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          git fetch origin develop:refs/remotes/origin/develop
+          # Count commits develop is ahead of main
+          AHEAD=$(git rev-list --left-right --count origin/main...origin/develop | awk '{print $2}')
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+          echo "Develop is $AHEAD commits ahead of main"
+
+      - name: Create PR from develop to main
+        if: steps.check_ahead.outputs.ahead != '0' && steps.check_pr.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base main \
+            --head develop \
+            --title "chore: merge upstream changes from develop to main" \
+            --body "## Upstream Sync PR
+
+          This PR merges the latest changes from \`develop\` (synced with upstream) into \`main\`.
+
+          **Changes**: ${{ steps.check_ahead.outputs.ahead }} commits ahead
+
+          Please review the changes and merge manually when ready. You can add your custom changes to \`main\` before or after merging this PR.
+
+          ---
+          *This PR was automatically created by the sync-develop-to-main workflow.*"
+
+      - name: Update existing PR
+        if: steps.check_ahead.outputs.ahead != '0' && steps.check_pr.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "PR #${{ steps.check_pr.outputs.pr_number }} already exists and will be automatically updated with the latest changes from develop."
+          gh pr comment ${{ steps.check_pr.outputs.pr_number }} --body "🔄 Updated with latest changes from develop (${{ steps.check_ahead.outputs.ahead }} commits ahead of main)"
+
+      - name: No changes to sync
+        if: steps.check_ahead.outputs.ahead == '0'
+        run: |
+          echo "✅ No changes to sync - develop and main are in sync"
