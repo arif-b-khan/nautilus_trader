@@ -36,7 +36,16 @@ jobs:
       - name: Add upstream and fetch
         if: steps.check_token.outputs.has_pat == 'true'
         run: |
+          # Configure git to use the PAT token
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Update origin remote to use PAT token
+          git remote set-url origin https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git
+          
+          # Add upstream remote
           git remote add upstream https://github.com/nautechsystems/nautilus_trader.git || true
+          
           # fetch all branches and tags from upstream and origin
           git fetch origin --prune
           git fetch upstream --prune --tags
@@ -44,13 +53,6 @@ jobs:
       - name: Create sync branch from upstream/develop
         if: steps.check_token.outputs.has_pat == 'true'
         run: |
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Configure git to use the PAT token for authentication
-          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          
           # Create a sync branch based on upstream/develop
           SYNC_BRANCH="sync/upstream-${{ github.run_id }}"
           git checkout -b "$SYNC_BRANCH" upstream/develop
