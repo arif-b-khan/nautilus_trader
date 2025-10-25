@@ -13,15 +13,28 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Check for PAT token
+        id: check_token
+        run: |
+          if [ -z "${{ secrets.PAT_TOKEN }}" ]; then
+            echo "⚠️ PAT_TOKEN secret is not set. This workflow requires a Personal Access Token with 'workflow' scope."
+            echo "has_pat=false" >> $GITHUB_OUTPUT
+          else
+            echo "✅ PAT_TOKEN is configured"
+            echo "has_pat=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout
+        if: steps.check_token.outputs.has_pat == 'true'
         uses: actions/checkout@v4
         with:
           ref: develop
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
           persist-credentials: true
 
       - name: Add upstream and fetch
+        if: steps.check_token.outputs.has_pat == 'true'
         run: |
           git remote add upstream https://github.com/nautechsystems/nautilus_trader.git || true
           # fetch all branches and tags from upstream and origin
@@ -29,6 +42,7 @@ jobs:
           git fetch upstream --prune --tags
 
       - name: Create sync branch from upstream/develop
+        if: steps.check_token.outputs.has_pat == 'true'
         run: |
           # Configure git
           git config user.name "github-actions[bot]"
@@ -48,6 +62,7 @@ jobs:
           echo "Sync branch $SYNC_BRANCH created and pushed."
 
       - name: Check if sync branch is ahead of develop
+        if: steps.check_token.outputs.has_pat == 'true'
         id: check_ahead
         run: |
           git fetch origin develop:refs/remotes/origin/develop || true
@@ -58,18 +73,37 @@ jobs:
           echo "Sync branch is $AHEAD commits ahead of develop"
 
       - name: Validate sync
+        if: steps.check_token.outputs.has_pat == 'true'
         run: |
           # Simple validation - check that we're on the sync branch
           echo "Current branch: $(git branch --show-current)"
           echo "Sync completed successfully"
 
       - name: Create PR
-        if: steps.check_ahead.outputs.ahead != '0'
+        if: steps.check_token.outputs.has_pat == 'true' && steps.check_ahead.outputs.ahead != '0'
         uses: peter-evans/create-pull-request@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
           base: develop
           branch: sync/upstream-${{ github.run_id }}
           title: "chore: sync from upstream nautechsystems/nautilus_trader @ ${{ github.run_id }}"
           body: |
             Automated sync from upstream nautechsystems/nautilus_trader.
+
+      - name: Setup instructions
+        if: steps.check_token.outputs.has_pat == 'false'
+        run: |
+          echo "::error::PAT_TOKEN secret is not configured. Please follow these steps:"
+          echo ""
+          echo "1. Go to GitHub Settings → Developer settings → Personal access tokens → Tokens (classic)"
+          echo "2. Click 'Generate new token (classic)'"
+          echo "3. Give it a name like 'Sync Upstream Workflow'"
+          echo "4. Select the 'workflow' scope (this allows updating workflow files)"
+          echo "5. Click 'Generate token' and copy the token"
+          echo "6. Go to your repository Settings → Secrets and variables → Actions"
+          echo "7. Click 'New repository secret'"
+          echo "8. Name it 'PAT_TOKEN' and paste your token"
+          echo "9. Click 'Add secret'"
+          echo ""
+          echo "After adding the secret, re-run this workflow."
+          exit 1
