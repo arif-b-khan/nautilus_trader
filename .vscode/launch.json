@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Attach (Jupyter, localhost:5678)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "127.0.0.1",
+        "port": 5678
+      },
+      "justMyCode": false,
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/nautilus_trader",
+          "remoteRoot": "${workspaceFolder}/nautilus_trader"
+        }
+      ]
+    },
+    {
+      "name": "Python: Attach (Pick Process)",
+      "type": "debugpy",
+      "request": "attach",
+      "processId": "${command:pickProcess}",
+      "justMyCode": false
+    },
+    {
+      "name": "Rust: Attach (LLDB -> Pick Python PID)",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": ["rust"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Python + Rust: Attach (Jupyter)",
+      "configurations": [
+        "Python: Attach (Jupyter, localhost:5678)",
+        "Rust: Attach (LLDB -> Pick Python PID)"
+      ],
+      "stopAll": true
+    }
+  ]
+}
