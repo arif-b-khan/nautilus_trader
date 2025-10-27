@@ -179,12 +179,14 @@ class OKXExecutionClient(LiveExecutionClient):
         self._ws_client = nautilus_pyo3.OKXWebSocketClient.with_credentials(
             url=config.base_url_ws or nautilus_pyo3.get_okx_ws_url_private(config.is_demo),
             account_id=self.pyo3_account_id,
+            heartbeat=20,
         )
         self._ws_client_futures: set[asyncio.Future] = set()
 
         self._ws_business_client = nautilus_pyo3.OKXWebSocketClient.with_credentials(
             url=nautilus_pyo3.get_okx_ws_url_business(config.is_demo),
             account_id=self.pyo3_account_id,
+            heartbeat=20,
         )
         self._ws_business_client_futures: set[asyncio.Future] = set()
 
@@ -839,6 +841,7 @@ class OKXExecutionClient(LiveExecutionClient):
                         response = await self._http_client.request_position_status_reports(
                             account_id=self.pyo3_account_id,
                             instrument_id=pyo3_instrument_id,
+                            instrument_type=OKXInstrumentType.MARGIN,
                         )
 
                         if not response:
