@@ -30,6 +30,22 @@
       "request": "attach",
       "pid": "${command:pickProcess}",
       "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Python: Run Active File (Debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${fileDirname}",
+      "justMyCode": false,
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "TWS_USERNAME": "${input:tw_username}",
+        "TWS_PASSWORD": "${input:tw_password}",
+        "TWS_HOST": "${input:tws_host}",
+        "TWS_PORT": "${input:tws_port}"
+      }
     }
   ],
   "compounds": [
@@ -40,6 +56,34 @@
         "Rust: Attach (LLDB -> Pick Python PID)"
       ],
       "stopAll": true
+    }
+  ]
+  ,
+  "inputs": [
+    {
+      "id": "tw_username",
+      "type": "promptString",
+      "description": "TWS username (leave blank to connect to local TWS)",
+      "default": ""
+    },
+    {
+      "id": "tw_password",
+      "type": "promptString",
+      "description": "TWS password",
+      "password": true,
+      "default": ""
+    },
+    {
+      "id": "tws_host",
+      "type": "promptString",
+      "description": "TWS host",
+      "default": "127.0.0.1"
+    },
+    {
+      "id": "tws_port",
+      "type": "promptString",
+      "description": "TWS port",
+      "default": "4001"
     }
   ]
 }
