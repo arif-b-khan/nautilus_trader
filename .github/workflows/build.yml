@@ -139,7 +139,7 @@ jobs:
         uses: ./.github/actions/common-test-data
 
       - name: Run Rust tests
-        run: make cargo-test-hypersync
+        run: make cargo-test HYPERSYNC=true
 
       - name: Build and install wheel
         uses: ./.github/actions/common-wheel-build
@@ -235,7 +235,7 @@ jobs:
         uses: ./.github/actions/common-test-data
 
       - name: Run Rust tests
-        run: make cargo-test-hypersync
+        run: make cargo-test HYPERSYNC=true
 
       - name: Build and install wheel
         uses: ./.github/actions/common-wheel-build
@@ -293,7 +293,7 @@ jobs:
         uses: ./.github/actions/common-test-data
 
       - name: Run Rust tests
-        run: make cargo-test-hypersync
+        run: make cargo-test HYPERSYNC=true
 
       - name: Build and install wheel
         uses: ./.github/actions/common-wheel-build
