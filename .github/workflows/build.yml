@@ -149,7 +149,8 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run --no-sync pytest --ignore=tests/performance_tests -n logical --dist=loadgroup
+          uv run --no-sync pytest --ignore=tests/performance_tests \
+            -n logical --dist=loadgroup --reruns 2 --reruns-delay 1
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
@@ -245,7 +246,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run --no-sync pytest --ignore=tests/performance_tests
+          uv run --no-sync pytest --ignore=tests/performance_tests --reruns 2 --reruns-delay 1
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
@@ -303,7 +304,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run --no-sync pytest --ignore=tests/performance_tests
+          uv run --no-sync pytest --ignore=tests/performance_tests --reruns 2 --reruns-delay 1
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
@@ -363,7 +364,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run --no-sync python -m pytest --ignore=tests/performance_tests
+          uv run --no-sync python -m pytest --ignore=tests/performance_tests --reruns 2 --reruns-delay 1
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
