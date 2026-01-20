@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -69,10 +69,12 @@ use std::{
     sync::Arc,
 };
 
+use ahash::AHashMap;
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use heck::ToSnakeCase;
 use itertools::Itertools;
+use nautilus_common::live::get_runtime;
 use nautilus_core::{
     UnixNanos,
     datetime::{iso8601_to_unix_nanos, unix_nanos_to_iso8601},
@@ -178,7 +180,7 @@ impl ParquetDataCatalog {
     #[must_use]
     pub fn new(
         base_path: PathBuf,
-        storage_options: Option<std::collections::HashMap<String, String>>,
+        storage_options: Option<AHashMap<String, String>>,
         batch_size: Option<usize>,
         compression: Option<parquet::basic::Compression>,
         max_row_group_size: Option<usize>,
@@ -228,7 +230,7 @@ impl ParquetDataCatalog {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use std::collections::HashMap;
+    /// use ahash::AHashMap;
     /// use nautilus_persistence::backend::catalog::ParquetDataCatalog;
     ///
     /// // Local filesystem
@@ -270,7 +272,7 @@ impl ParquetDataCatalog {
     /// ```
     pub fn from_uri(
         uri: &str,
-        storage_options: Option<std::collections::HashMap<String, String>>,
+        storage_options: Option<AHashMap<String, String>>,
         batch_size: Option<usize>,
         compression: Option<parquet::basic::Compression>,
         max_row_group_size: Option<usize>,
@@ -414,6 +416,7 @@ impl ParquetDataCatalog {
     /// # Returns
     ///
     /// Returns the [`PathBuf`] of the created file, or an empty path if no data was provided.
+    /// If the target file already exists, returns the path without writing (skips write).
     ///
     /// # Errors
     ///
@@ -421,7 +424,7 @@ impl ParquetDataCatalog {
     /// - Data serialization to Arrow record batches fails.
     /// - Object store write operations fail.
     /// - File path construction fails.
-    /// - Timestamp interval validation fails after writing.
+    /// - Writing would create non-disjoint timestamp intervals.
     ///
     /// # Panics
     ///
@@ -470,15 +473,33 @@ impl ParquetDataCatalog {
         let directory = self.make_path(T::path_prefix(), instrument_id)?;
         let filename = timestamps_to_filename(start_ts, end_ts);
         let path = PathBuf::from(format!("{directory}/{filename}"));
+        let object_path = self.to_object_path(&path.to_string_lossy());
 
-        // Write all batches to parquet file
+        let file_exists =
+            self.execute_async(async { Ok(self.object_store.head(&object_path).await.is_ok()) })?;
+        if file_exists {
+            log::info!("File {path:?} already exists, skipping write");
+            return Ok(path);
+        }
+
+        if !skip_disjoint_check.unwrap_or(false) {
+            let current_intervals = self.get_directory_intervals(&directory)?;
+            let new_interval = (start_ts.as_u64(), end_ts.as_u64());
+            let mut new_intervals = current_intervals.clone();
+            new_intervals.push(new_interval);
+
+            if !are_intervals_disjoint(&new_intervals) {
+                anyhow::bail!(
+                    "Writing file {filename} with interval ({start_ts}, {end_ts}) would create \
+                    non-disjoint intervals. Existing intervals: {current_intervals:?}"
+                );
+            }
+        }
+
         log::info!(
             "Writing {} batches of {type_name} data to {path:?}",
             batches.len()
         );
-
-        // Convert path to object store path
-        let object_path = self.to_object_path(&path.to_string_lossy());
 
         self.execute_async(async {
             write_batches_to_object_store(
@@ -490,14 +511,6 @@ impl ParquetDataCatalog {
             )
             .await
         })?;
-
-        if !skip_disjoint_check.unwrap_or(false) {
-            let intervals = self.get_directory_intervals(&directory)?;
-
-            if !are_intervals_disjoint(&intervals) {
-                anyhow::bail!("Intervals are not disjoint after writing a new file");
-            }
-        }
 
         Ok(path)
     }
@@ -1078,6 +1091,9 @@ impl ParquetDataCatalog {
     where
         T: DecodeDataFromRecordBatch + CatalogPathPrefix + TryFrom<Data>,
     {
+        // Reset session to allow repeated queries (streams are consumed on each query)
+        self.reset_session();
+
         let query_result = self.query::<T>(instrument_ids, start, end, where_clause, files)?;
         let all_data = query_result.collect();
 
@@ -1612,7 +1628,7 @@ impl ParquetDataCatalog {
     where
         F: std::future::Future<Output = anyhow::Result<R>>,
     {
-        let rt = nautilus_common::runtime::get_runtime();
+        let rt = get_runtime();
         rt.block_on(future)
     }
 }

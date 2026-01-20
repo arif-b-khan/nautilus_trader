@@ -318,11 +318,9 @@ typedef struct TimeEvent_t {
 } TimeEvent_t;
 
 /**
- * Legacy time event handler for Cython/FFI inter-operatbility
+ * FFI time event handler for Cython interoperability.
  *
- * TODO: Remove once Cython is deprecated
- *
- * `TimeEventHandler` associates a `TimeEvent` with a callback function that is triggered
+ * Associates a `TimeEvent` with a callback function that is triggered
  * when the event's timestamp is reached.
  */
 typedef struct TimeEventHandler_t {
@@ -429,6 +427,13 @@ void test_clock_set_timer(struct TestClock_API *clock,
  */
 CVec test_clock_advance_time(struct TestClock_API *clock, uint64_t to_time_ns, uint8_t set_time);
 
+/**
+ * Drops a `CVec` of `TimeEventHandler_API` values.
+ *
+ * # Panics
+ *
+ * Panics if `CVec` invariants are violated (corrupted metadata).
+ */
 void vec_time_event_handlers_drop(CVec v);
 
 /**
@@ -694,6 +699,15 @@ void logging_clock_set_realtime_mode(void);
 void logging_clock_set_static_mode(void);
 
 void logging_clock_set_static_time(uint64_t time_ns);
+
+/**
+ * Drops a `TimeEventHandler_API`, releasing any Python callback reference.
+ *
+ * # Safety
+ *
+ * The handler must be valid and not previously dropped.
+ */
+void time_event_handler_drop(struct TimeEventHandler_t handler);
 
 /**
  * # Safety

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -189,16 +189,13 @@ def bypass_logging():
     to debug specific tests, simply comment this out.
 
     """
-    # Uncomment below for tracing logs from Rust
-    # from nautilus_trader.core import nautilus_pyo3
-    # nautilus_pyo3.init_tracing()
     guard = init_logging(
         level_stdout=LogLevel.DEBUG,
         bypass=True,  # Set this to False to see logging in tests
         # print_config=True,
     )
-    # Yield guard to keep it alive for the session lifetime, avoiding garbage collection
-    yield guard
+    # Return guard to keep it alive for the session lifetime, avoiding garbage collection
+    return guard
 
 
 @pytest.fixture

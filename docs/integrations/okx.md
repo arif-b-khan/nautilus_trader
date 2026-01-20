@@ -15,13 +15,13 @@ You can find live example scripts [here](https://github.com/nautechsystems/nauti
 
 ### Product support
 
-| Product Type      | Data Feed | Trading | Notes                                          |
-|-------------------|-----------|---------|------------------------------------------------|
-| Spot              | ✓         | ✓       | Use for index prices.                          |
-| Perpetual Swaps   | ✓         | ✓       | Linear and inverse contracts.                  |
-| Futures           | ✓         | ✓       | Specific expiration dates.                     |
-| Margin            | -         | -       | *Not yet supported*.                           |
-| Options           | ✓         | -       | *Data feed supported, trading coming soon*.    |
+| Product Type      | Data Feed | Trading | Notes                                            |
+|-------------------|-----------|---------|--------------------------------------------------|
+| Spot              | ✓         | ✓       | Use for index prices.                            |
+| Perpetual Swaps   | ✓         | ✓       | Linear and inverse contracts.                    |
+| Futures           | ✓         | ✓       | Specific expiration dates.                       |
+| Margin            | ✓         | ✓       | Spot trading with margin/leverage (spot margin). |
+| Options           | ✓         | -       | *Data feed supported, trading coming soon*.      |
 
 :::note
 **Options support**: While you can subscribe to options market data and receive price updates, order execution for options is not yet implemented. You can use the symbology format shown above to subscribe to options data feeds.
@@ -42,7 +42,7 @@ The OKX adapter includes multiple components, which can be used separately or to
 - `OKXLiveExecClientFactory`: Factory for OKX execution clients (used by the trading node builder).
 
 :::note
-Most users will simply define a configuration for a live trading node (as shown below),
+Most users will define a configuration for a live trading node (as shown below),
 and won’t need to work directly with these lower-level components.
 :::
 
@@ -151,15 +151,15 @@ use_hyphens_in_client_order_ids=False
 
 ### Order types
 
-| Order Type          | Linear Perpetual Swap | Notes                                |
-|---------------------|-----------------------|--------------------------------------|
+| Order Type          | Linear Perpetual Swap | Notes                                                         |
+|---------------------|-----------------------|---------------------------------------------------------------|
 | `MARKET`            | ✓                     | Immediate execution at market price. Supports quote quantity. |
-| `LIMIT`             | ✓                     | Execution at specified price or better. |
-| `STOP_MARKET`       | ✓                     | Conditional market order (OKX algo order). |
-| `STOP_LIMIT`        | ✓                     | Conditional limit order (OKX algo order). |
-| `MARKET_IF_TOUCHED` | ✓                     | Conditional market order (OKX algo order). |
-| `LIMIT_IF_TOUCHED`  | ✓                     | Conditional limit order (OKX algo order). |
-| `TRAILING_STOP`     | -                     | *Not yet supported*. |
+| `LIMIT`             | ✓                     | Execution at specified price or better.                       |
+| `STOP_MARKET`       | ✓                     | Conditional market order (OKX algo order).                    |
+| `STOP_LIMIT`        | ✓                     | Conditional limit order (OKX algo order).                     |
+| `MARKET_IF_TOUCHED` | ✓                     | Conditional market order (OKX algo order).                    |
+| `LIMIT_IF_TOUCHED`  | ✓                     | Conditional limit order (OKX algo order).                     |
+| `TRAILING_STOP`     | -                     | *Not yet supported*.                                          |
 
 :::info
 **Conditional orders**: `STOP_MARKET`, `STOP_LIMIT`, `MARKET_IF_TOUCHED`, and `LIMIT_IF_TOUCHED` are implemented as OKX algo orders, providing advanced trigger capabilities with multiple price sources.
@@ -379,8 +379,8 @@ Only use manual override if you have specific requirements that cannot be met th
 
 ### Contingent orders
 
-| Feature             | Linear Perpetual Swap | Notes                                     |
-|---------------------|-----------------------|---------------------------------------------|
+| Feature             | Linear Perpetual Swap | Notes                                      |
+|---------------------|-----------------------|--------------------------------------------|
 | Order lists         | -                     | *Not supported*.                           |
 | OCO orders          | ✓                     | One-Cancels-Other orders.                  |
 | Bracket orders      | ✓                     | Stop loss + take profit combinations.      |
@@ -464,7 +464,27 @@ Or pass them directly in the configuration (not recommended for production).
 
 ## Demo trading
 
-OKX provides a demo trading environment for testing strategies without real funds. To use demo mode, set `is_demo=True` in your client configuration:
+OKX provides a demo trading environment for testing strategies without real funds.
+
+### Setting up a demo account
+
+1. Log into your OKX account at [okx.com](https://www.okx.com).
+2. Navigate to **Trade** → **Demo Trading**.
+3. Go to **Personal Center** within Demo Trading.
+4. Select **Demo Trading API** and create a new API key.
+5. Note down your demo API key, secret, and passphrase.
+
+You can provide demo credentials through environment variables:
+
+```bash
+export OKX_API_KEY="your_demo_api_key"
+export OKX_API_SECRET="your_demo_api_secret"
+export OKX_API_PASSPHRASE="your_demo_passphrase"
+```
+
+### Configuration
+
+Set `is_demo=True` in your client configuration:
 
 ```python
 config = TradingNodeConfig(
@@ -487,10 +507,9 @@ When demo mode is enabled:
 
 - REST API requests include the `x-simulated-trading: 1` header.
 - WebSocket connections use demo endpoints (`wspap.okx.com`).
-- The same API credentials are used as production.
 
 :::note
-You must use API keys created specifically for demo trading. Production API keys will not work in demo mode.
+Demo API keys are separate from production keys. You must create API keys specifically for demo trading through the Demo Trading interface—production API keys will not work in demo mode.
 :::
 
 ## Rate limiting
@@ -504,7 +523,8 @@ The adapter enforces OKX’s per-endpoint quotas while keeping sensible defaults
 
 ### WebSocket limits
 
-- Subscription operations: 3 requests per second.
+- Connection establishment: 3 requests per second (per IP).
+- Subscription operations (subscribe/unsubscribe/login): 480 requests per hour per connection.
 - Order actions (place/cancel/amend): 250 requests per second.
 
 :::warning
@@ -544,13 +564,21 @@ The OKX data client provides the following configuration options:
 |--------------------------------------|---------------------------------|-------------|
 | `instrument_types`                   | `(OKXInstrumentType.SPOT,)`     | Controls which OKX instrument families are loaded (spot, swap, futures, options). |
 | `contract_types`                     | `None`                          | Restricts loading to specific contract styles when combined with `instrument_types`. |
+| `instrument_families`                | `None`                          | Instrument families to load (e.g., "BTC-USD", "ETH-USD"). Required for OPTIONS. Optional for FUTURES/SWAP. Not applicable for SPOT/MARGIN. |
 | `base_url_http`                      | `None`                          | Override for the OKX REST endpoint; defaults to the production URL resolved at runtime. |
 | `base_url_ws`                        | `None`                          | Override for the market data WebSocket endpoint. |
-| `api_key` / `api_secret` / `api_passphrase` | `None`                  | When omitted, pulled from the `OKX_API_KEY`, `OKX_API_SECRET`, and `OKX_PASSPHRASE` environment variables. |
+| `api_key`                            | `None`      | Falls back to `OKX_API_KEY` environment variable when unset. |
+| `api_secret`                         | `None`      | Falls back to `OKX_API_SECRET` environment variable when unset. |
+| `api_passphrase`                     | `None`      | Falls back to `OKX_PASSPHRASE` environment variable when unset. |
 | `is_demo`                            | `False`                         | Connects to the OKX demo environment when `True`. |
 | `http_timeout_secs`                  | `60`                            | Request timeout (seconds) for REST market data calls. |
+| `max_retries`                        | `3`                             | Maximum retry attempts for recoverable REST errors. |
+| `retry_delay_initial_ms`             | `1,000`                         | Initial delay (milliseconds) before retrying a failed request. |
+| `retry_delay_max_ms`                 | `10,000`                        | Upper bound for exponential backoff delay between retries. |
 | `update_instruments_interval_mins`   | `60`                            | Interval, in minutes, between background instrument refreshes. |
 | `vip_level`                          | `None`                          | Enables higher-depth order book channels when set to the matching OKX VIP tier. |
+| `http_proxy_url`                     | `None`                          | Optional HTTP proxy URL. |
+| `ws_proxy_url`                       | `None`                          | Optional WebSocket proxy URL. |
 
 The OKX execution client provides the following configuration options:
 
@@ -560,9 +588,12 @@ The OKX execution client provides the following configuration options:
 |----------------------------|-------------|-------------|
 | `instrument_types`         | `(OKXInstrumentType.SPOT,)` | Instrument families that should be tradable for this client. |
 | `contract_types`           | `None`      | Restricts tradable contracts (linear, inverse, options) when paired with `instrument_types`. |
+| `instrument_families`      | `None`      | Instrument families to load (e.g., "BTC-USD", "ETH-USD"). Required for OPTIONS. Optional for FUTURES/SWAP. Not applicable for SPOT/MARGIN. |
 | `base_url_http`            | `None`      | Override for the OKX trading REST endpoint. |
 | `base_url_ws`              | `None`      | Override for the private WebSocket endpoint. |
-| `api_key` / `api_secret` / `api_passphrase` | `None` | Fall back to `OKX_API_KEY`, `OKX_API_SECRET`, and `OKX_PASSPHRASE` environment variables when unset. |
+| `api_key`                  | `None`      | Falls back to `OKX_API_KEY` environment variable when unset. |
+| `api_secret`               | `None`      | Falls back to `OKX_API_SECRET` environment variable when unset. |
+| `api_passphrase`           | `None`      | Falls back to `OKX_PASSPHRASE` environment variable when unset. |
 | `margin_mode`              | `None`      | Margin mode for derivatives trading (`ISOLATED` or `CROSS`). Only applies to SWAP/FUTURES/OPTIONS. Defaults to `ISOLATED` if not specified. |
 | `use_spot_margin`          | `False`     | Enables margin/leverage for SPOT trading. When `True`, uses `spot_isolated` trade mode. When `False`, uses `cash` trade mode (no leverage). Only applies to SPOT instruments. |
 | `is_demo`                  | `False`     | Connects to the OKX demo trading environment. |
@@ -572,6 +603,8 @@ The OKX execution client provides the following configuration options:
 | `max_retries`              | `3`         | Maximum retry attempts for recoverable REST errors. |
 | `retry_delay_initial_ms`   | `1,000`     | Initial delay (milliseconds) applied before retrying a failed request. |
 | `retry_delay_max_ms`       | `10,000`    | Upper bound for the exponential backoff delay between retries. |
+| `http_proxy_url`           | `None`      | Optional HTTP proxy URL. |
+| `ws_proxy_url`             | `None`      | Optional WebSocket proxy URL. |
 
 Below is an example configuration for a live trading node using OKX data and execution clients:
 
@@ -618,6 +651,8 @@ node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
 node.add_exec_client_factory(OKX, OKXLiveExecClientFactory)
 node.build()
 ```
+
+## Contributing
 
 :::info
 For additional features or to contribute to the OKX adapter, please see our

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,21 +13,21 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use ahash::AHashMap;
 use alloy::primitives::Address;
 use futures_util::Stream;
 use hypersync_client::{
-    net_types::{BlockSelection, FieldSelection, Query},
+    net_types::{BlockField, BlockSelection, FieldSelection, Query},
     simple_types::Log,
 };
-use nautilus_common::runtime::get_runtime;
+use nautilus_common::live::get_runtime;
 use nautilus_model::{
     defi::{Block, DexType, SharedChain},
     identifiers::InstrumentId,
 };
-use reqwest::Url;
+use nautilus_network::http::Url;
 
 use crate::{
     exchanges::get_dex_extended, hypersync::transform::transform_hypersync_block,
@@ -69,7 +69,10 @@ impl HyperSyncClient {
     ///
     /// # Panics
     ///
-    /// Panics if the chain's `hypersync_url` is invalid or if the underlying client cannot be initialized.
+    /// Panics if:
+    /// - The chain's `hypersync_url` is invalid.
+    /// - The `ENVIO_API_TOKEN` environment variable is not set or invalid.
+    /// - The underlying client cannot be initialized.
     #[must_use]
     pub fn new(
         chain: SharedChain,
@@ -79,8 +82,11 @@ impl HyperSyncClient {
         let mut config = hypersync_client::ClientConfig::default();
         let hypersync_url =
             Url::parse(chain.hypersync_url.as_str()).expect("Invalid HyperSync URL");
-        config.url = Some(hypersync_url);
-        let client = hypersync_client::Client::new(config).unwrap();
+        config.url = hypersync_url.to_string();
+        config.api_token = std::env::var("ENVIO_API_TOKEN")
+            .expect("ENVIO_API_TOKEN environment variable must be set");
+        let client = hypersync_client::Client::new(config)
+            .expect("Failed to create HyperSync client - check ENVIO_API_TOKEN is a valid UUID");
 
         Self {
             chain,
@@ -126,7 +132,7 @@ impl HyperSyncClient {
         let tx = if let Some(tx) = &self.tx {
             tx.clone()
         } else {
-            tracing::error!("Hypersync client channel should have been initialized");
+            log::error!("Hypersync client channel should have been initialized");
             return;
         };
         let client = self.client.clone();
@@ -138,7 +144,7 @@ impl HyperSyncClient {
             let mut rx = match client.stream(query, Default::default()).await {
                 Ok(rx) => rx,
                 Err(e) => {
-                    tracing::error!("Failed to create DEX event stream: {e}");
+                    log::error!("Failed to create DEX event stream: {e}");
                     return;
                 }
             };
@@ -146,7 +152,7 @@ impl HyperSyncClient {
             loop {
                 tokio::select! {
                     () = cancellation_token.cancelled() => {
-                        tracing::debug!("DEX event processing task received cancellation signal");
+                        log::debug!("DEX event processing task received cancellation signal");
                         break;
                     }
                     response = rx.recv() => {
@@ -157,7 +163,7 @@ impl HyperSyncClient {
                         let response = match response {
                             Ok(resp) => resp,
                             Err(e) => {
-                                tracing::error!("Failed to receive DEX event stream response: {e}");
+                                log::error!("Failed to receive DEX event stream response: {e}");
                                 break;
                             }
                         };
@@ -171,55 +177,55 @@ impl HyperSyncClient {
                                     None => continue,
                                 };
                                 if event_signature == swap_event_encoded_signature {
-                                    match dex_extended.parse_swap_event(log.clone()) {
+                                    match dex_extended.parse_swap_event_hypersync(log.clone()) {
                                         Ok(swap_event) => {
                                             if let Err(e) =
                                                 tx.send(BlockchainMessage::SwapEvent(swap_event))
                                             {
-                                                tracing::error!("Failed to send swap event: {e}");
+                                                log::error!("Failed to send swap event: {e}");
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::error!(
+                                            log::error!(
                                                 "Failed to parse swap with error '{e:?}' for event: {log:?}",
                                             );
                                             continue;
                                         }
                                     }
                                 } else if event_signature == mint_event_encoded_signature {
-                                    match dex_extended.parse_mint_event(log.clone()) {
+                                    match dex_extended.parse_mint_event_hypersync(log.clone()) {
                                         Ok(swap_event) => {
                                             if let Err(e) =
                                                 tx.send(BlockchainMessage::MintEvent(swap_event))
                                             {
-                                                tracing::error!("Failed to send mint event: {e}");
+                                                log::error!("Failed to send mint event: {e}");
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::error!(
+                                            log::error!(
                                                 "Failed to parse mint with error '{e:?}' for event: {log:?}",
                                             );
                                             continue;
                                         }
                                     }
                                 } else if event_signature == burn_event_encoded_signature {
-                                    match dex_extended.parse_burn_event(log.clone()) {
+                                    match dex_extended.parse_burn_event_hypersync(log.clone()) {
                                         Ok(swap_event) => {
                                             if let Err(e) =
                                                 tx.send(BlockchainMessage::BurnEvent(swap_event))
                                             {
-                                                tracing::error!("Failed to send burn event: {e}");
+                                                log::error!("Failed to send burn event: {e}");
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::error!(
+                                            log::error!(
                                                 "Failed to parse burn with error '{e:?}' for event: {log:?}",
                                             );
                                             continue;
                                         }
                                     }
                                 } else {
-                                    tracing::error!("Unknown event signature: {event_signature}");
+                                    log::error!("Unknown event signature: {event_signature}");
                                     continue;
                                 }
                             }
@@ -248,7 +254,7 @@ impl HyperSyncClient {
         let query = Self::construct_contract_events_query(
             from_block,
             to_block,
-            vec![contract_address.clone()],
+            vec![*contract_address],
             topics,
         );
 
@@ -274,7 +280,7 @@ impl HyperSyncClient {
 
     /// Disconnects from the HyperSync service and stops all background tasks.
     pub async fn disconnect(&mut self) {
-        tracing::debug!("Disconnecting HyperSync client");
+        log::debug!("Disconnecting HyperSync client");
         self.cancellation_token.cancel();
 
         // Await blocks task with timeout, abort if it takes too long
@@ -286,13 +292,13 @@ impl HyperSyncClient {
             .await
             {
                 Ok(Ok(())) => {
-                    tracing::debug!("Blocks task completed gracefully");
+                    log::debug!("Blocks task completed gracefully");
                 }
                 Ok(Err(e)) => {
-                    tracing::error!("Error awaiting blocks task: {e}");
+                    log::error!("Error awaiting blocks task: {e}");
                 }
                 Err(_) => {
-                    tracing::warn!(
+                    log::warn!(
                         "Blocks task did not complete within {DISCONNECT_TIMEOUT_SECS}s timeout, \
                          aborting task (this is expected if Hypersync long-poll was in progress)"
                     );
@@ -304,7 +310,7 @@ impl HyperSyncClient {
 
         // DEX event tasks are short-lived and self-clean via cancellation_token
 
-        tracing::debug!("HyperSync client disconnected");
+        log::debug!("HyperSync client disconnected");
     }
 
     /// Returns the current block
@@ -364,7 +370,7 @@ impl HyperSyncClient {
         let tx = if let Some(tx) = &self.tx {
             tx.clone()
         } else {
-            tracing::error!("Hypersync client channel should have been initialized");
+            log::error!("Hypersync client channel should have been initialized");
             return;
         };
 
@@ -374,7 +380,7 @@ impl HyperSyncClient {
         self.blocks_cancellation_token = Some(blocks_token);
 
         let task = get_runtime().spawn(async move {
-            tracing::debug!("Starting task 'blocks_feed");
+            log::debug!("Starting task 'blocks_feed");
 
             let current_block_height = client.get_height().await.unwrap();
             let mut query = Self::construct_block_query(current_block_height, None);
@@ -382,7 +388,7 @@ impl HyperSyncClient {
             loop {
                 tokio::select! {
                     () = cancellation_token.cancelled() => {
-                        tracing::debug!("Blocks subscription task received cancellation signal");
+                        log::debug!("Blocks subscription task received cancellation signal");
                         break;
                     }
                     result = tokio::time::timeout(
@@ -392,11 +398,11 @@ impl HyperSyncClient {
                         let response = match result {
                             Ok(Ok(resp)) => resp,
                             Ok(Err(e)) => {
-                                tracing::error!("Hypersync request failed: {e}");
+                                log::error!("Hypersync request failed: {e}");
                                 break;
                             }
                             Err(_) => {
-                                tracing::warn!("Hypersync request timed out after {HYPERSYNC_REQUEST_TIMEOUT_SECS}s, retrying...");
+                                log::warn!("Hypersync request timed out after {HYPERSYNC_REQUEST_TIMEOUT_SECS}s, retrying...");
                                 continue;
                             }
                         };
@@ -417,7 +423,7 @@ impl HyperSyncClient {
                             while client.get_height().await.unwrap() < response.next_block {
                                 tokio::select! {
                                     () = cancellation_token.cancelled() => {
-                                        tracing::debug!("Blocks subscription task received cancellation signal during polling");
+                                        log::debug!("Blocks subscription task received cancellation signal during polling");
                                         return;
                                     }
                                     () = tokio::time::sleep(std::time::Duration::from_millis(
@@ -438,18 +444,12 @@ impl HyperSyncClient {
 
     /// Constructs a HyperSync query for fetching blocks with all available fields within the specified range.
     fn construct_block_query(from_block: u64, to_block: Option<u64>) -> Query {
-        let all_block_fields: BTreeSet<String> = hypersync_schema::block_header()
-            .fields
-            .iter()
-            .map(|x| x.name.clone())
-            .collect();
-
         Query {
             from_block,
             to_block,
             blocks: vec![BlockSelection::default()],
             field_selection: FieldSelection {
-                block: all_block_fields,
+                block: BlockField::all(),
                 ..Default::default()
             },
             ..Default::default()
@@ -501,9 +501,9 @@ impl HyperSyncClient {
                 token.cancel();
             }
             if let Err(e) = task.await {
-                tracing::error!("Error awaiting blocks task during unsubscribe: {e}");
+                log::error!("Error awaiting blocks task during unsubscribe: {e}");
             }
-            tracing::debug!("Unsubscribed from blocks");
+            log::debug!("Unsubscribed from blocks");
         }
     }
 }

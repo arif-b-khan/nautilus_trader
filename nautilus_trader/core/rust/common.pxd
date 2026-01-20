@@ -200,11 +200,9 @@ cdef extern from "../includes/common.h":
         # UNIX timestamp (nanoseconds) when the instance was created.
         uint64_t ts_init;
 
-    # Legacy time event handler for Cython/FFI inter-operatbility
+    # FFI time event handler for Cython interoperability.
     #
-    # TODO: Remove once Cython is deprecated
-    #
-    # `TimeEventHandler` associates a `TimeEvent` with a callback function that is triggered
+    # Associates a `TimeEvent` with a callback function that is triggered
     # when the event's timestamp is reached.
     cdef struct TimeEventHandler_t:
         # The time event.
@@ -295,6 +293,11 @@ cdef extern from "../includes/common.h":
     # Assumes `set_time` is a correct `uint8_t` of either 0 or 1.
     CVec test_clock_advance_time(TestClock_API *clock, uint64_t to_time_ns, uint8_t set_time);
 
+    # Drops a `CVec` of `TimeEventHandler_API` values.
+    #
+    # # Panics
+    #
+    # Panics if `CVec` invariants are violated (corrupted metadata).
     void vec_time_event_handlers_drop(CVec v);
 
     # # Safety
@@ -526,6 +529,13 @@ cdef extern from "../includes/common.h":
     void logging_clock_set_static_mode();
 
     void logging_clock_set_static_time(uint64_t time_ns);
+
+    # Drops a `TimeEventHandler_API`, releasing any Python callback reference.
+    #
+    # # Safety
+    #
+    # The handler must be valid and not previously dropped.
+    void time_event_handler_drop(TimeEventHandler_t handler);
 
     # # Safety
     #

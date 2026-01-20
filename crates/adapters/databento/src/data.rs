@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -19,6 +19,7 @@
 //! handles live market data subscriptions, and provides access to historical data on demand.
 
 use std::{
+    fmt::Debug,
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
@@ -30,6 +31,8 @@ use ahash::AHashMap;
 use databento::live::Subscription;
 use indexmap::IndexMap;
 use nautilus_common::{
+    clients::DataClient,
+    live::{runner::get_data_event_sender, runtime::get_runtime},
     messages::{
         DataEvent,
         data::{
@@ -38,10 +41,8 @@ use nautilus_common::{
             UnsubscribeInstrumentStatus, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
-    runner::get_data_event_sender,
 };
 use nautilus_core::{MUTEX_POISONED, time::AtomicTime};
-use nautilus_data::client::DataClient;
 use nautilus_model::{
     enums::BarAggregation,
     identifiers::{ClientId, Symbol, Venue},
@@ -51,6 +52,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    common::Credential,
     historical::{DatabentoHistoricalClient, RangeQueryParams},
     live::{DatabentoFeedHandler, LiveCommand, LiveMessage},
     loader::DatabentoDataLoader,
@@ -59,33 +61,68 @@ use crate::{
 };
 
 /// Configuration for the Databento data client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DatabentoDataClientConfig {
-    /// Databento API key.
-    pub api_key: String,
+    /// Databento API credential.
+    credential: Credential,
     /// Path to publishers.json file.
     pub publishers_filepath: PathBuf,
     /// Whether to use exchange as venue for GLBX instruments.
     pub use_exchange_as_venue: bool,
     /// Whether to timestamp bars on close.
     pub bars_timestamp_on_close: bool,
+    /// Reconnection timeout in minutes (None for infinite retries).
+    pub reconnect_timeout_mins: Option<u64>,
+    /// Optional HTTP proxy URL.
+    pub http_proxy_url: Option<String>,
+    /// Optional WebSocket proxy URL.
+    pub ws_proxy_url: Option<String>,
+}
+
+impl Debug for DatabentoDataClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(DatabentoDataClientConfig))
+            .field("credential", &"<redacted>")
+            .field("publishers_filepath", &self.publishers_filepath)
+            .field("use_exchange_as_venue", &self.use_exchange_as_venue)
+            .field("bars_timestamp_on_close", &self.bars_timestamp_on_close)
+            .field("reconnect_timeout_mins", &self.reconnect_timeout_mins)
+            .field("http_proxy_url", &self.http_proxy_url)
+            .field("ws_proxy_url", &self.ws_proxy_url)
+            .finish()
+    }
 }
 
 impl DatabentoDataClientConfig {
     /// Creates a new [`DatabentoDataClientConfig`] instance.
     #[must_use]
-    pub const fn new(
-        api_key: String,
+    pub fn new(
+        api_key: impl Into<String>,
         publishers_filepath: PathBuf,
         use_exchange_as_venue: bool,
         bars_timestamp_on_close: bool,
     ) -> Self {
         Self {
-            api_key,
+            credential: Credential::new(api_key),
             publishers_filepath,
             use_exchange_as_venue,
             bars_timestamp_on_close,
+            reconnect_timeout_mins: Some(10), // Default: 10 minutes
+            http_proxy_url: None,
+            ws_proxy_url: None,
         }
+    }
+
+    /// Returns the API key associated with this config.
+    #[must_use]
+    pub fn api_key(&self) -> &str {
+        self.credential.api_key()
+    }
+
+    /// Returns a masked version of the API key for logging purposes.
+    #[must_use]
+    pub fn api_key_masked(&self) -> String {
+        self.credential.api_key_masked()
     }
 }
 
@@ -133,7 +170,7 @@ impl DatabentoDataClient {
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
         let historical = DatabentoHistoricalClient::new(
-            config.api_key.clone(),
+            config.api_key().to_string(),
             config.publishers_filepath.clone(),
             clock,
             config.use_exchange_as_venue,
@@ -190,11 +227,11 @@ impl DatabentoDataClient {
         let mut channels = self.cmd_channels.lock().expect(MUTEX_POISONED);
 
         if !channels.contains_key(dataset) {
-            tracing::info!("Creating new feed handler for dataset: {dataset}");
+            log::info!("Creating new feed handler for dataset: {dataset}");
             let cmd_tx = self.initialize_live_feed(dataset.to_string())?;
             channels.insert(dataset.to_string(), cmd_tx);
 
-            tracing::debug!("Feed handler created for dataset: {dataset}, channel stored");
+            log::debug!("Feed handler created for dataset: {dataset}, channel stored");
         }
 
         Ok(())
@@ -229,7 +266,7 @@ impl DatabentoDataClient {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(1000);
 
         let mut feed_handler = DatabentoFeedHandler::new(
-            self.config.api_key.clone(),
+            self.config.api_key().to_string(),
             dataset,
             cmd_rx,
             msg_tx,
@@ -237,20 +274,21 @@ impl DatabentoDataClient {
             self.symbol_venue_map.clone(),
             self.config.use_exchange_as_venue,
             self.config.bars_timestamp_on_close,
+            self.config.reconnect_timeout_mins,
         );
 
         let cancellation_token = self.cancellation_token.clone();
 
         // Spawn the feed handler task with cancellation support
-        let feed_handle = tokio::spawn(async move {
+        let feed_handle = get_runtime().spawn(async move {
             tokio::select! {
                 result = feed_handler.run() => {
                     if let Err(e) = result {
-                        tracing::error!("Feed handler error: {e}");
+                        log::error!("Feed handler error: {e}");
                     }
                 }
                 () = cancellation_token.cancelled() => {
-                    tracing::debug!("Feed handler cancelled");
+                    log::debug!("Feed handler cancelled");
                 }
             }
         });
@@ -259,50 +297,53 @@ impl DatabentoDataClient {
         let data_sender = self.data_sender.clone();
 
         // Spawn message processing task with cancellation support
-        let msg_handle = tokio::spawn(async move {
+        let msg_handle = get_runtime().spawn(async move {
             let mut msg_rx = msg_rx;
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         match msg {
                             Some(LiveMessage::Data(data)) => {
-                                tracing::debug!("Received data: {data:?}");
+                                log::debug!("Received data: {data:?}");
                                 if let Err(e) = data_sender.send(DataEvent::Data(data)) {
-                                    tracing::error!("Failed to send data event: {e}");
+                                    log::error!("Failed to send data event: {e}");
                                 }
                             }
                             Some(LiveMessage::Instrument(instrument)) => {
-                                tracing::debug!("Received instrument: {}", instrument.id());
+                                log::debug!("Received instrument: {}", instrument.id());
                                 // TODO: Forward to cache or instrument manager
                             }
                             Some(LiveMessage::Status(status)) => {
-                                tracing::debug!("Received status: {status:?}");
+                                log::debug!("Received status: {status:?}");
                                 // TODO: Forward to appropriate handler
                             }
                             Some(LiveMessage::Imbalance(imbalance)) => {
-                                tracing::debug!("Received imbalance: {imbalance:?}");
+                                log::debug!("Received imbalance: {imbalance:?}");
                                 // TODO: Forward to appropriate handler
                             }
                             Some(LiveMessage::Statistics(statistics)) => {
-                                tracing::debug!("Received statistics: {statistics:?}");
+                                log::debug!("Received statistics: {statistics:?}");
                                 // TODO: Forward to appropriate handler
                             }
+                            Some(LiveMessage::SubscriptionAck(ack)) => {
+                                log::debug!("Received subscription ack: {}", ack.message);
+                            }
                             Some(LiveMessage::Error(error)) => {
-                                tracing::error!("Feed handler error: {error}");
+                                log::error!("Feed handler error: {error}");
                                 // TODO: Handle error appropriately
                             }
                             Some(LiveMessage::Close) => {
-                                tracing::info!("Feed handler closed");
+                                log::info!("Feed handler closed");
                                 break;
                             }
                             None => {
-                                tracing::debug!("Message channel closed");
+                                log::debug!("Message channel closed");
                                 break;
                             }
                         }
                     }
                     () = cancellation_token.cancelled() => {
-                        tracing::debug!("Message processing cancelled");
+                        log::debug!("Message processing cancelled");
                         break;
                     }
                 }
@@ -319,7 +360,7 @@ impl DatabentoDataClient {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl DataClient for DatabentoDataClient {
     /// Returns the client identifier.
     fn client_id(&self) -> ClientId {
@@ -337,7 +378,7 @@ impl DataClient for DatabentoDataClient {
     ///
     /// Returns an error if the client fails to start.
     fn start(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Starting");
+        log::debug!("Starting");
         Ok(())
     }
 
@@ -347,7 +388,7 @@ impl DataClient for DatabentoDataClient {
     ///
     /// Returns an error if the client fails to stop cleanly.
     fn stop(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Stopping");
+        log::debug!("Stopping");
 
         // Signal cancellation to all running tasks
         self.cancellation_token.cancel();
@@ -356,7 +397,7 @@ impl DataClient for DatabentoDataClient {
         let channels = self.cmd_channels.lock().expect(MUTEX_POISONED);
         for (dataset, tx) in channels.iter() {
             if let Err(e) = tx.send(LiveCommand::Close) {
-                tracing::error!("Failed to send close command to dataset {dataset}: {e}");
+                log::error!("Failed to send close command to dataset {dataset}: {e}");
             }
         }
 
@@ -365,29 +406,29 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Resetting");
+        log::debug!("Resetting");
         self.is_connected.store(false, Ordering::Relaxed);
         Ok(())
     }
 
     fn dispose(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Disposing");
+        log::debug!("Disposing");
         self.stop()
     }
 
     async fn connect(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Connecting...");
+        log::debug!("Connecting...");
 
         // Connection will happen lazily when subscriptions are made
         // No need to create feed handlers upfront since we don't know which datasets will be needed
         self.is_connected.store(true, Ordering::Relaxed);
 
-        tracing::info!("Connected");
+        log::info!("Connected");
         Ok(())
     }
 
     async fn disconnect(&mut self) -> anyhow::Result<()> {
-        tracing::debug!("Disconnecting...");
+        log::debug!("Disconnecting...");
 
         // Signal cancellation to all running tasks
         self.cancellation_token.cancel();
@@ -397,7 +438,7 @@ impl DataClient for DatabentoDataClient {
             let channels = self.cmd_channels.lock().expect(MUTEX_POISONED);
             for (dataset, tx) in channels.iter() {
                 if let Err(e) = tx.send(LiveCommand::Close) {
-                    tracing::error!("Failed to send close command to dataset {dataset}: {e}");
+                    log::error!("Failed to send close command to dataset {dataset}: {e}");
                 }
             }
         }
@@ -412,7 +453,7 @@ impl DataClient for DatabentoDataClient {
             if let Err(e) = handle.await
                 && !e.is_cancelled()
             {
-                tracing::error!("Task join error: {e}");
+                log::error!("Task join error: {e}");
             }
         }
 
@@ -423,7 +464,7 @@ impl DataClient for DatabentoDataClient {
             channels.clear();
         }
 
-        tracing::info!("Disconnected");
+        log::info!("Disconnected");
         Ok(())
     }
 
@@ -442,7 +483,7 @@ impl DataClient for DatabentoDataClient {
     ///
     /// Returns an error if the subscription request fails.
     fn subscribe_quotes(&mut self, cmd: &SubscribeQuotes) -> anyhow::Result<()> {
-        tracing::debug!("Subscribe quotes: {cmd:?}");
+        log::debug!("Subscribe quotes: {cmd:?}");
 
         let dataset = self.get_dataset_for_venue(cmd.instrument_id.venue)?;
         let was_new_handler = {
@@ -478,7 +519,7 @@ impl DataClient for DatabentoDataClient {
     ///
     /// Returns an error if the subscription request fails.
     fn subscribe_trades(&mut self, cmd: &SubscribeTrades) -> anyhow::Result<()> {
-        tracing::debug!("Subscribe trades: {cmd:?}");
+        log::debug!("Subscribe trades: {cmd:?}");
 
         let dataset = self.get_dataset_for_venue(cmd.instrument_id.venue)?;
         let was_new_handler = {
@@ -514,7 +555,7 @@ impl DataClient for DatabentoDataClient {
     ///
     /// Returns an error if the subscription request fails.
     fn subscribe_book_deltas(&mut self, cmd: &SubscribeBookDeltas) -> anyhow::Result<()> {
-        tracing::debug!("Subscribe book deltas: {cmd:?}");
+        log::debug!("Subscribe book deltas: {cmd:?}");
 
         let dataset = self.get_dataset_for_venue(cmd.instrument_id.venue)?;
         let was_new_handler = {
@@ -553,7 +594,7 @@ impl DataClient for DatabentoDataClient {
         &mut self,
         cmd: &SubscribeInstrumentStatus,
     ) -> anyhow::Result<()> {
-        tracing::debug!("Subscribe instrument status: {cmd:?}");
+        log::debug!("Subscribe instrument status: {cmd:?}");
 
         let dataset = self.get_dataset_for_venue(cmd.instrument_id.venue)?;
         let was_new_handler = {
@@ -585,12 +626,12 @@ impl DataClient for DatabentoDataClient {
 
     // Unsubscribe methods
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
-        tracing::debug!("Unsubscribe quotes: {cmd:?}");
+        log::debug!("Unsubscribe quotes: {cmd:?}");
 
         // Note: Databento live API doesn't support granular unsubscribing.
         // The feed handler manages subscriptions and can handle reconnections
         // with the appropriate subscription state.
-        tracing::warn!(
+        log::warn!(
             "Databento does not support granular unsubscribing - ignoring unsubscribe request for {}",
             cmd.instrument_id
         );
@@ -599,12 +640,12 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
-        tracing::debug!("Unsubscribe trades: {cmd:?}");
+        log::debug!("Unsubscribe trades: {cmd:?}");
 
         // Note: Databento live API doesn't support granular unsubscribing.
         // The feed handler manages subscriptions and can handle reconnections
         // with the appropriate subscription state.
-        tracing::warn!(
+        log::warn!(
             "Databento does not support granular unsubscribing - ignoring unsubscribe request for {}",
             cmd.instrument_id
         );
@@ -613,12 +654,12 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
-        tracing::debug!("Unsubscribe book deltas: {cmd:?}");
+        log::debug!("Unsubscribe book deltas: {cmd:?}");
 
         // Note: Databento live API doesn't support granular unsubscribing.
         // The feed handler manages subscriptions and can handle reconnections
         // with the appropriate subscription state.
-        tracing::warn!(
+        log::warn!(
             "Databento does not support granular unsubscribing - ignoring unsubscribe request for {}",
             cmd.instrument_id
         );
@@ -630,12 +671,12 @@ impl DataClient for DatabentoDataClient {
         &mut self,
         cmd: &UnsubscribeInstrumentStatus,
     ) -> anyhow::Result<()> {
-        tracing::debug!("Unsubscribe instrument status: {cmd:?}");
+        log::debug!("Unsubscribe instrument status: {cmd:?}");
 
         // Note: Databento live API doesn't support granular unsubscribing.
         // The feed handler manages subscriptions and can handle reconnections
         // with the appropriate subscription state.
-        tracing::warn!(
+        log::warn!(
             "Databento does not support granular unsubscribing - ignoring unsubscribe request for {}",
             cmd.instrument_id
         );
@@ -645,12 +686,12 @@ impl DataClient for DatabentoDataClient {
 
     // Historical data request methods using the historical client
     fn request_instruments(&self, request: &RequestInstruments) -> anyhow::Result<()> {
-        tracing::debug!("Request instruments: {request:?}");
+        log::debug!("Request instruments: {request:?}");
 
         let historical_client = self.historical.clone();
         let request = request.clone();
 
-        tokio::spawn(async move {
+        get_runtime().spawn(async move {
             // Convert request to historical query parameters
             // For now, use a default symbol set or derive from venue
             let symbols = vec!["ALL_SYMBOLS".to_string()]; // TODO: Improve symbol handling
@@ -672,11 +713,11 @@ impl DataClient for DatabentoDataClient {
 
             match historical_client.get_range_instruments(params).await {
                 Ok(instruments) => {
-                    tracing::info!("Retrieved {} instruments", instruments.len());
+                    log::info!("Retrieved {} instruments", instruments.len());
                     // TODO: Send instruments to message bus or cache
                 }
                 Err(e) => {
-                    tracing::error!("Failed to request instruments: {e}");
+                    log::error!("Failed to request instruments: {e}");
                 }
             }
         });
@@ -685,12 +726,12 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn request_quotes(&self, request: &RequestQuotes) -> anyhow::Result<()> {
-        tracing::debug!("Request quotes: {request:?}");
+        log::debug!("Request quotes: {request:?}");
 
         let historical_client = self.historical.clone();
         let request = request.clone();
 
-        tokio::spawn(async move {
+        get_runtime().spawn(async move {
             let symbols = vec![instrument_id_to_symbol_string(
                 request.instrument_id,
                 &mut AHashMap::new(), // TODO: Use proper symbol map
@@ -713,11 +754,11 @@ impl DataClient for DatabentoDataClient {
 
             match historical_client.get_range_quotes(params, None).await {
                 Ok(quotes) => {
-                    tracing::info!("Retrieved {} quotes", quotes.len());
+                    log::info!("Retrieved {} quotes", quotes.len());
                     // TODO: Send quotes to message bus
                 }
                 Err(e) => {
-                    tracing::error!("Failed to request quotes: {e}");
+                    log::error!("Failed to request quotes: {e}");
                 }
             }
         });
@@ -726,12 +767,12 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn request_trades(&self, request: &RequestTrades) -> anyhow::Result<()> {
-        tracing::debug!("Request trades: {request:?}");
+        log::debug!("Request trades: {request:?}");
 
         let historical_client = self.historical.clone();
         let request = request.clone();
 
-        tokio::spawn(async move {
+        get_runtime().spawn(async move {
             let symbols = vec![instrument_id_to_symbol_string(
                 request.instrument_id,
                 &mut AHashMap::new(), // TODO: Use proper symbol map
@@ -754,11 +795,11 @@ impl DataClient for DatabentoDataClient {
 
             match historical_client.get_range_trades(params).await {
                 Ok(trades) => {
-                    tracing::info!("Retrieved {} trades", trades.len());
+                    log::info!("Retrieved {} trades", trades.len());
                     // TODO: Send trades to message bus
                 }
                 Err(e) => {
-                    tracing::error!("Failed to request trades: {e}");
+                    log::error!("Failed to request trades: {e}");
                 }
             }
         });
@@ -767,12 +808,12 @@ impl DataClient for DatabentoDataClient {
     }
 
     fn request_bars(&self, request: &RequestBars) -> anyhow::Result<()> {
-        tracing::debug!("Request bars: {request:?}");
+        log::debug!("Request bars: {request:?}");
 
         let historical_client = self.historical.clone();
         let request = request.clone();
 
-        tokio::spawn(async move {
+        get_runtime().spawn(async move {
             let symbols = vec![instrument_id_to_symbol_string(
                 request.bar_type.instrument_id(),
                 &mut AHashMap::new(), // TODO: Use proper symbol map
@@ -800,7 +841,7 @@ impl DataClient for DatabentoDataClient {
                 BarAggregation::Hour => BarAggregation::Hour,
                 BarAggregation::Day => BarAggregation::Day,
                 _ => {
-                    tracing::error!(
+                    log::error!(
                         "Unsupported bar aggregation: {:?}",
                         request.bar_type.spec().aggregation
                     );
@@ -813,11 +854,11 @@ impl DataClient for DatabentoDataClient {
                 .await
             {
                 Ok(bars) => {
-                    tracing::info!("Retrieved {} bars", bars.len());
+                    log::info!("Retrieved {} bars", bars.len());
                     // TODO: Send bars to message bus
                 }
                 Err(e) => {
-                    tracing::error!("Failed to request bars: {e}");
+                    log::error!("Failed to request bars: {e}");
                 }
             }
         });

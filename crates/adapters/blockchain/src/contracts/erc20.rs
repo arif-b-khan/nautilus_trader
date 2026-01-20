@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -206,7 +206,7 @@ impl Erc20Contract {
             Ok(results) => results,
             Err(e) => {
                 // Multicall failed (likely expired/broken contract causing RPC failure)
-                tracing::warn!(
+                log::warn!(
                     "Batch multicall failed: {}. Falling back to individual fetches for {} tokens",
                     e,
                     token_addresses.len()
@@ -220,10 +220,8 @@ impl Erc20Contract {
                             token_infos.insert(*token_address, Ok(info));
                         }
                         Err(e) => {
-                            tracing::debug!(
-                                "Token {} failed individual fetch (likely expired/broken): {}",
-                                token_address,
-                                e
+                            log::debug!(
+                                "Token {token_address} failed individual fetch (likely expired/broken): {e}"
                             );
                             token_infos.insert(*token_address, Err(e));
                         }
@@ -240,7 +238,7 @@ impl Erc20Contract {
 
             // Check if we have all 3 results for this token.
             if base_idx + 2 >= results.len() {
-                tracing::error!("Incomplete results from multicall for token {token_address}");
+                log::error!("Incomplete results from multicall for token {token_address}");
                 token_infos.insert(
                     *token_address,
                     Err(TokenInfoError::UnexpectedResultCount {
@@ -327,7 +325,15 @@ fn parse_erc20_string_result(
     match field_name {
         Erc20Field::Name => ERC20::nameCall::abi_decode_returns(&result.returnData),
         Erc20Field::Symbol => ERC20::symbolCall::abi_decode_returns(&result.returnData),
-        _ => panic!("Expected Name or Symbol for for parse_erc20_string_result function argument"),
+        Erc20Field::Decimals => {
+            return Err(TokenInfoError::DecodingError {
+                field: field_name.to_string(),
+                address: *token_address,
+                reason: "Expected Name or Symbol for parse_erc20_string_result function argument"
+                    .to_string(),
+                raw_data: result.returnData.to_string(),
+            });
+        }
     }
     .map_err(|e| TokenInfoError::DecodingError {
         field: field_name.to_string(),

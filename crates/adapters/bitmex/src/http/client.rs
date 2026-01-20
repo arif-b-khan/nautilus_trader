@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -25,15 +25,18 @@
 use std::{
     collections::HashMap,
     num::NonZeroU32,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use ahash::AHashMap;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use nautilus_core::{
-    MUTEX_POISONED, UnixNanos,
+    UnixNanos,
     consts::{NAUTILUS_TRADER, NAUTILUS_USER_AGENT},
-    env::get_env_var,
+    env::get_or_env_var_opt,
     time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
@@ -49,11 +52,10 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use nautilus_network::{
-    http::HttpClient,
+    http::{HttpClient, Method, StatusCode, USER_AGENT},
     ratelimiter::quota::Quota,
     retry::{RetryConfig, RetryManager},
 };
-use reqwest::{Method, StatusCode, header::USER_AGENT};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -81,8 +83,8 @@ use crate::{
     },
     http::{
         parse::{
-            parse_fill_report, parse_instrument_any, parse_order_status_report,
-            parse_position_report, parse_trade, parse_trade_bin,
+            InstrumentParseResult, parse_fill_report, parse_instrument_any,
+            parse_order_status_report, parse_position_report, parse_trade, parse_trade_bin,
         },
         query::{DeleteAllOrdersParamsBuilder, GetOrderParamsBuilder, PutOrderParamsBuilder},
     },
@@ -100,6 +102,13 @@ const BITMEX_DEFAULT_RATE_LIMIT_PER_MINUTE_UNAUTHENTICATED: u32 = 30;
 
 const BITMEX_GLOBAL_RATE_KEY: &str = "bitmex:global";
 const BITMEX_MINUTE_RATE_KEY: &str = "bitmex:minute";
+
+static RATE_LIMIT_KEYS: LazyLock<Vec<Ustr>> = LazyLock::new(|| {
+    vec![
+        Ustr::from(BITMEX_GLOBAL_RATE_KEY),
+        Ustr::from(BITMEX_MINUTE_RATE_KEY),
+    ]
+});
 
 /// Represents a BitMEX HTTP response.
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,7 +137,7 @@ pub struct BitmexResponse<T> {
 ///
 /// The client automatically respects these limits through the configured quota.
 #[derive(Debug, Clone)]
-pub struct BitmexHttpInnerClient {
+pub struct BitmexRawHttpClient {
     base_url: String,
     client: HttpClient,
     credential: Option<Credential>,
@@ -137,24 +146,15 @@ pub struct BitmexHttpInnerClient {
     cancellation_token: CancellationToken,
 }
 
-impl Default for BitmexHttpInnerClient {
+impl Default for BitmexRawHttpClient {
     fn default() -> Self {
-        Self::new(None, Some(60), None, None, None, None, None, None)
+        Self::new(None, Some(60), None, None, None, None, None, None, None)
             .expect("Failed to create default BitmexHttpInnerClient")
     }
 }
 
-impl BitmexHttpInnerClient {
-    /// Cancel all pending HTTP requests.
-    pub fn cancel_all_requests(&self) {
-        self.cancellation_token.cancel();
-    }
-
-    /// Get the cancellation token for this client.
-    pub fn cancellation_token(&self) -> &CancellationToken {
-        &self.cancellation_token
-    }
-    /// Creates a new [`BitmexHttpInnerClient`] using the default BitMEX HTTP URL,
+impl BitmexRawHttpClient {
+    /// Creates a new [`BitmexRawHttpClient`] using the default BitMEX HTTP URL,
     /// optionally overridden with a custom base URL.
     ///
     /// This version of the client has **no credentials**, so it can only
@@ -173,6 +173,7 @@ impl BitmexHttpInnerClient {
         recv_window_ms: Option<u64>,
         max_requests_per_second: Option<u32>,
         max_requests_per_minute: Option<u32>,
+        proxy_url: Option<String>,
     ) -> Result<Self, BitmexHttpError> {
         let retry_config = RetryConfig {
             max_retries: max_retries.unwrap_or(3),
@@ -185,9 +186,7 @@ impl BitmexHttpInnerClient {
             max_elapsed_ms: Some(180_000),
         };
 
-        let retry_manager = RetryManager::new(retry_config).map_err(|e| {
-            BitmexHttpError::NetworkError(format!("Failed to create retry manager: {e}"))
-        })?;
+        let retry_manager = RetryManager::new(retry_config);
 
         let max_req_per_sec =
             max_requests_per_second.unwrap_or(BITMEX_DEFAULT_RATE_LIMIT_PER_SECOND);
@@ -202,7 +201,11 @@ impl BitmexHttpInnerClient {
                 Self::rate_limiter_quotas(max_req_per_sec, max_req_per_min),
                 Some(Self::default_quota(max_req_per_sec)),
                 timeout_secs,
-            ),
+                proxy_url,
+            )
+            .map_err(|e| {
+                BitmexHttpError::NetworkError(format!("Failed to create HTTP client: {e}"))
+            })?,
             credential: None,
             recv_window_ms: recv_window_ms.unwrap_or(10_000),
             retry_manager,
@@ -210,7 +213,7 @@ impl BitmexHttpInnerClient {
         })
     }
 
-    /// Creates a new [`BitmexHttpInnerClient`] configured with credentials
+    /// Creates a new [`BitmexRawHttpClient`] configured with credentials
     /// for authenticated requests, optionally using a custom base URL.
     ///
     /// # Errors
@@ -228,6 +231,7 @@ impl BitmexHttpInnerClient {
         recv_window_ms: Option<u64>,
         max_requests_per_second: Option<u32>,
         max_requests_per_minute: Option<u32>,
+        proxy_url: Option<String>,
     ) -> Result<Self, BitmexHttpError> {
         let retry_config = RetryConfig {
             max_retries: max_retries.unwrap_or(3),
@@ -240,9 +244,7 @@ impl BitmexHttpInnerClient {
             max_elapsed_ms: Some(180_000),
         };
 
-        let retry_manager = RetryManager::new(retry_config).map_err(|e| {
-            BitmexHttpError::NetworkError(format!("Failed to create retry manager: {e}"))
-        })?;
+        let retry_manager = RetryManager::new(retry_config);
 
         let max_req_per_sec =
             max_requests_per_second.unwrap_or(BITMEX_DEFAULT_RATE_LIMIT_PER_SECOND);
@@ -257,7 +259,11 @@ impl BitmexHttpInnerClient {
                 Self::rate_limiter_quotas(max_req_per_sec, max_req_per_min),
                 Some(Self::default_quota(max_req_per_sec)),
                 timeout_secs,
-            ),
+                proxy_url,
+            )
+            .map_err(|e| {
+                BitmexHttpError::NetworkError(format!("Failed to create HTTP client: {e}"))
+            })?,
             credential: Some(Credential::new(api_key, api_secret)),
             recv_window_ms: recv_window_ms.unwrap_or(10_000),
             retry_manager,
@@ -296,10 +302,17 @@ impl BitmexHttpInnerClient {
     }
 
     fn rate_limit_keys() -> Vec<Ustr> {
-        vec![
-            Ustr::from(BITMEX_GLOBAL_RATE_KEY),
-            Ustr::from(BITMEX_MINUTE_RATE_KEY),
-        ]
+        RATE_LIMIT_KEYS.clone()
+    }
+
+    /// Cancel all pending HTTP requests.
+    pub fn cancel_all_requests(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    /// Get the cancellation token for this client.
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation_token
     }
 
     fn sign_request(
@@ -342,27 +355,47 @@ impl BitmexHttpInnerClient {
         Ok(headers)
     }
 
-    async fn send_request<T: DeserializeOwned>(
+    async fn send_request<T: DeserializeOwned, P: Serialize>(
         &self,
         method: Method,
         endpoint: &str,
+        params: Option<&P>,
         body: Option<Vec<u8>>,
         authenticate: bool,
     ) -> Result<T, BitmexHttpError> {
         let endpoint = endpoint.to_string();
-        let url = format!("{}{endpoint}", self.base_url);
         let method_clone = method.clone();
         let body_clone = body.clone();
+
+        // Serialize params before closure to avoid reference lifetime issues
+        // Query params are used with GET and DELETE methods
+        let params_str = if method == Method::GET || method == Method::DELETE {
+            params
+                .map(serde_urlencoded::to_string)
+                .transpose()
+                .map_err(|e| {
+                    BitmexHttpError::JsonError(format!("Failed to serialize params: {e}"))
+                })?
+        } else {
+            None
+        };
+
+        let full_endpoint = match params_str {
+            Some(ref query) if !query.is_empty() => format!("{endpoint}?{query}"),
+            _ => endpoint.clone(),
+        };
+
+        let url = format!("{}{}", self.base_url, full_endpoint);
 
         let operation = || {
             let url = url.clone();
             let method = method_clone.clone();
             let body = body_clone.clone();
-            let endpoint = endpoint.clone();
+            let full_endpoint = full_endpoint.clone();
 
             async move {
                 let headers = if authenticate {
-                    Some(self.sign_request(&method, endpoint.as_str(), body.as_deref())?)
+                    Some(self.sign_request(&method, &full_endpoint, body.as_deref())?)
                 } else {
                     None
                 };
@@ -370,7 +403,7 @@ impl BitmexHttpInnerClient {
                 let rate_keys = Self::rate_limit_keys();
                 let resp = self
                     .client
-                    .request_with_ustr_keys(method, url, headers, body, None, Some(rate_keys))
+                    .request_with_ustr_keys(method, url, None, headers, body, None, Some(rate_keys))
                     .await?;
 
                 if resp.status.is_success() {
@@ -391,20 +424,20 @@ impl BitmexHttpInnerClient {
 
         // Retry strategy based on BitMEX error responses and HTTP status codes:
         //
-        // 1. Network errors: always retry (transient connection issues)
-        // 2. HTTP 5xx/429: server errors and rate limiting should be retried
+        // 1. Network errors: always retry (transient connection issues).
+        // 2. HTTP 5xx/429: server errors and rate limiting should be retried.
         // 3. BitMEX JSON errors with specific handling:
-        //    - "RateLimitError": explicit rate limit error from BitMEX
+        //    - "RateLimitError": explicit rate limit error from BitMEX.
         //    - "HTTPError": generic error name used by BitMEX for various issues
         //      Only retry if message contains "rate limit" to avoid retrying
         //      non-transient errors like authentication failures, validation errors,
-        //      insufficient balance, etc. which also return as "HTTPError"
+        //      insufficient balance, etc. which also return as "HTTPError".
         //
         // Note: BitMEX returns many permanent errors as "HTTPError" (e.g., "Invalid orderQty",
         // "Account has insufficient Available Balance", "Invalid API Key") which should NOT
         // be retried. We only retry when the message explicitly mentions rate limiting.
         //
-        // See tests in tests/http.rs for retry behavior validation
+        // See tests in tests/http.rs for retry behavior validation.
         let should_retry = |error: &BitmexHttpError| -> bool {
             match error {
                 BitmexHttpError::NetworkError(_) => true,
@@ -447,7 +480,7 @@ impl BitmexHttpInnerClient {
     /// # Errors
     ///
     /// Returns an error if the request fails, the response cannot be parsed, or the API returns an error.
-    pub async fn http_get_instruments(
+    pub async fn get_instruments(
         &self,
         active_only: bool,
     ) -> Result<Vec<BitmexInstrument>, BitmexHttpError> {
@@ -456,7 +489,8 @@ impl BitmexHttpInnerClient {
         } else {
             "/instrument"
         };
-        self.send_request(Method::GET, path, None, false).await
+        self.send_request::<_, ()>(Method::GET, path, None, None, false)
+            .await
     }
 
     /// Requests the current server time from BitMEX.
@@ -468,8 +502,10 @@ impl BitmexHttpInnerClient {
     ///
     /// Returns an error if the HTTP request fails or if the response body
     /// cannot be parsed into [`BitmexApiInfo`].
-    pub async fn http_get_server_time(&self) -> Result<u64, BitmexHttpError> {
-        let response: BitmexApiInfo = self.send_request(Method::GET, "", None, false).await?;
+    pub async fn get_server_time(&self) -> Result<u64, BitmexHttpError> {
+        let response: BitmexApiInfo = self
+            .send_request::<_, ()>(Method::GET, "", None, None, false)
+            .await?;
         Ok(response.timestamp)
     }
 
@@ -483,13 +519,14 @@ impl BitmexHttpInnerClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the payload cannot be deserialized.
-    pub async fn http_get_instrument(
+    pub async fn get_instrument(
         &self,
         symbol: &str,
     ) -> Result<Option<BitmexInstrument>, BitmexHttpError> {
         let path = &format!("/instrument?symbol={symbol}");
-        let instruments: Vec<BitmexInstrument> =
-            self.send_request(Method::GET, path, None, false).await?;
+        let instruments: Vec<BitmexInstrument> = self
+            .send_request::<_, ()>(Method::GET, path, None, None, false)
+            .await?;
 
         Ok(instruments.into_iter().next())
     }
@@ -499,9 +536,10 @@ impl BitmexHttpInnerClient {
     /// # Errors
     ///
     /// Returns an error if credentials are missing, the request fails, or the API returns an error.
-    pub async fn http_get_wallet(&self) -> Result<BitmexWallet, BitmexHttpError> {
+    pub async fn get_wallet(&self) -> Result<BitmexWallet, BitmexHttpError> {
         let endpoint = "/user/wallet";
-        self.send_request(Method::GET, endpoint, None, true).await
+        self.send_request::<_, ()>(Method::GET, endpoint, None, None, true)
+            .await
     }
 
     /// Get user margin information.
@@ -509,9 +547,10 @@ impl BitmexHttpInnerClient {
     /// # Errors
     ///
     /// Returns an error if credentials are missing, the request fails, or the API returns an error.
-    pub async fn http_get_margin(&self, currency: &str) -> Result<BitmexMargin, BitmexHttpError> {
+    pub async fn get_margin(&self, currency: &str) -> Result<BitmexMargin, BitmexHttpError> {
         let path = format!("/user/margin?currency={currency}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request::<_, ()>(Method::GET, &path, None, None, true)
+            .await
     }
 
     /// Get historical trades.
@@ -523,15 +562,12 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_get_trades(
+    pub async fn get_trades(
         &self,
         params: GetTradeParams,
     ) -> Result<Vec<BitmexTrade>, BitmexHttpError> {
-        let query = serde_urlencoded::to_string(&params).map_err(|e| {
-            BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
-        })?;
-        let path = format!("/trade?{query}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request(Method::GET, "/trade", Some(&params), None, true)
+            .await
     }
 
     /// Get bucketed (aggregated) trade data.
@@ -539,15 +575,12 @@ impl BitmexHttpInnerClient {
     /// # Errors
     ///
     /// Returns an error if credentials are missing, the request fails, or the API returns an error.
-    pub async fn http_get_trade_bucketed(
+    pub async fn get_trade_bucketed(
         &self,
         params: GetTradeBucketedParams,
     ) -> Result<Vec<BitmexTradeBin>, BitmexHttpError> {
-        let query = serde_urlencoded::to_string(&params).map_err(|e| {
-            BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
-        })?;
-        let path = format!("/trade/bucketed?{query}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request(Method::GET, "/trade/bucketed", Some(&params), None, true)
+            .await
     }
 
     /// Get user orders.
@@ -559,15 +592,12 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_get_orders(
+    pub async fn get_orders(
         &self,
         params: GetOrderParams,
     ) -> Result<Vec<BitmexOrder>, BitmexHttpError> {
-        let query = serde_urlencoded::to_string(&params).map_err(|e| {
-            BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
-        })?;
-        let path = format!("/order?{query}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request(Method::GET, "/order", Some(&params), None, true)
+            .await
     }
 
     /// Place a new order.
@@ -579,10 +609,7 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_place_order(
-        &self,
-        params: PostOrderParams,
-    ) -> Result<Value, BitmexHttpError> {
+    pub async fn place_order(&self, params: PostOrderParams) -> Result<Value, BitmexHttpError> {
         // BitMEX spec requires form-encoded body for POST /order
         let body = serde_urlencoded::to_string(&params)
             .map_err(|e| {
@@ -590,7 +617,7 @@ impl BitmexHttpInnerClient {
             })?
             .into_bytes();
         let path = "/order";
-        self.send_request(Method::POST, path, Some(body), true)
+        self.send_request::<_, ()>(Method::POST, path, None, Some(body), true)
             .await
     }
 
@@ -603,10 +630,7 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_cancel_orders(
-        &self,
-        params: DeleteOrderParams,
-    ) -> Result<Value, BitmexHttpError> {
+    pub async fn cancel_orders(&self, params: DeleteOrderParams) -> Result<Value, BitmexHttpError> {
         // BitMEX spec requires form-encoded body for DELETE /order
         let body = serde_urlencoded::to_string(&params)
             .map_err(|e| {
@@ -614,7 +638,7 @@ impl BitmexHttpInnerClient {
             })?
             .into_bytes();
         let path = "/order";
-        self.send_request(Method::DELETE, path, Some(body), true)
+        self.send_request::<_, ()>(Method::DELETE, path, None, Some(body), true)
             .await
     }
 
@@ -627,7 +651,7 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_amend_order(&self, params: PutOrderParams) -> Result<Value, BitmexHttpError> {
+    pub async fn amend_order(&self, params: PutOrderParams) -> Result<Value, BitmexHttpError> {
         // BitMEX spec requires form-encoded body for PUT /order
         let body = serde_urlencoded::to_string(&params)
             .map_err(|e| {
@@ -635,7 +659,8 @@ impl BitmexHttpInnerClient {
             })?
             .into_bytes();
         let path = "/order";
-        self.send_request(Method::PUT, path, Some(body), true).await
+        self.send_request::<_, ()>(Method::PUT, path, None, Some(body), true)
+            .await
     }
 
     /// Cancel all orders.
@@ -651,15 +676,12 @@ impl BitmexHttpInnerClient {
     /// # References
     ///
     /// <https://www.bitmex.com/api/explorer/#!/Order/Order_cancelAll>
-    pub async fn http_cancel_all_orders(
+    pub async fn cancel_all_orders(
         &self,
         params: DeleteAllOrdersParams,
     ) -> Result<Value, BitmexHttpError> {
-        let query = serde_urlencoded::to_string(&params).map_err(|e| {
-            BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
-        })?;
-        let path = format!("/order/all?{query}");
-        self.send_request(Method::DELETE, &path, None, true).await
+        self.send_request(Method::DELETE, "/order/all", Some(&params), None, true)
+            .await
     }
 
     /// Get user executions.
@@ -671,7 +693,7 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_get_executions(
+    pub async fn get_executions(
         &self,
         params: GetExecutionParams,
     ) -> Result<Vec<BitmexExecution>, BitmexHttpError> {
@@ -679,7 +701,8 @@ impl BitmexHttpInnerClient {
             BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
         })?;
         let path = format!("/execution/tradeHistory?{query}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request::<_, ()>(Method::GET, &path, None, None, true)
+            .await
     }
 
     /// Get user positions.
@@ -691,15 +714,12 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_get_positions(
+    pub async fn get_positions(
         &self,
         params: GetPositionParams,
     ) -> Result<Vec<BitmexPosition>, BitmexHttpError> {
-        let query = serde_urlencoded::to_string(&params).map_err(|e| {
-            BitmexHttpError::ValidationError(format!("Failed to serialize parameters: {e}"))
-        })?;
-        let path = format!("/position?{query}");
-        self.send_request(Method::GET, &path, None, true).await
+        self.send_request(Method::GET, "/position", Some(&params), None, true)
+            .await
     }
 
     /// Update position leverage.
@@ -711,7 +731,7 @@ impl BitmexHttpInnerClient {
     /// # Panics
     ///
     /// Panics if the parameters cannot be serialized (should never happen with valid builder-generated params).
-    pub async fn http_update_position_leverage(
+    pub async fn update_position_leverage(
         &self,
         params: PostPositionLeverageParams,
     ) -> Result<BitmexPosition, BitmexHttpError> {
@@ -722,7 +742,7 @@ impl BitmexHttpInnerClient {
             })?
             .into_bytes();
         let path = "/position/leverage";
-        self.send_request(Method::POST, path, Some(body), true)
+        self.send_request::<_, ()>(Method::POST, path, None, Some(body), true)
             .await
     }
 }
@@ -731,14 +751,32 @@ impl BitmexHttpInnerClient {
 ///
 /// This is the high-level client that wraps the inner client and provides
 /// Nautilus-specific functionality for trading operations.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.adapters")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.bitmex")
 )]
 pub struct BitmexHttpClient {
-    inner: Arc<BitmexHttpInnerClient>,
-    instruments_cache: Arc<Mutex<AHashMap<Ustr, InstrumentAny>>>,
+    inner: Arc<BitmexRawHttpClient>,
+    pub(crate) instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
+    cache_initialized: AtomicBool,
+}
+
+impl Clone for BitmexHttpClient {
+    fn clone(&self) -> Self {
+        let cache_initialized = AtomicBool::new(false);
+
+        let is_initialized = self.cache_initialized.load(Ordering::Acquire);
+        if is_initialized {
+            cache_initialized.store(true, Ordering::Release);
+        }
+
+        Self {
+            inner: self.inner.clone(),
+            instruments_cache: self.instruments_cache.clone(),
+            cache_initialized,
+        }
+    }
 }
 
 impl Default for BitmexHttpClient {
@@ -755,6 +793,7 @@ impl Default for BitmexHttpClient {
             None,
             None,
             None,
+            None, // proxy_url
         )
         .expect("Failed to create default BitmexHttpClient")
     }
@@ -779,6 +818,7 @@ impl BitmexHttpClient {
         recv_window_ms: Option<u64>,
         max_requests_per_second: Option<u32>,
         max_requests_per_minute: Option<u32>,
+        proxy_url: Option<String>,
     ) -> Result<Self, BitmexHttpError> {
         // Determine the base URL
         let url = base_url.unwrap_or_else(|| {
@@ -790,7 +830,7 @@ impl BitmexHttpClient {
         });
 
         let inner = match (api_key, api_secret) {
-            (Some(key), Some(secret)) => BitmexHttpInnerClient::with_credentials(
+            (Some(key), Some(secret)) => BitmexRawHttpClient::with_credentials(
                 key,
                 secret,
                 url,
@@ -801,8 +841,9 @@ impl BitmexHttpClient {
                 recv_window_ms,
                 max_requests_per_second,
                 max_requests_per_minute,
+                proxy_url,
             )?,
-            _ => BitmexHttpInnerClient::new(
+            _ => BitmexRawHttpClient::new(
                 Some(url),
                 timeout_secs,
                 max_retries,
@@ -811,12 +852,14 @@ impl BitmexHttpClient {
                 recv_window_ms,
                 max_requests_per_second,
                 max_requests_per_minute,
+                proxy_url,
             )?,
         };
 
         Ok(Self {
             inner: Arc::new(inner),
-            instruments_cache: Arc::new(Mutex::new(AHashMap::new())),
+            instruments_cache: Arc::new(DashMap::new()),
+            cache_initialized: AtomicBool::new(false),
         })
     }
 
@@ -827,8 +870,10 @@ impl BitmexHttpClient {
     ///
     /// Returns an error if required environment variables are not set or invalid.
     pub fn from_env() -> anyhow::Result<Self> {
-        Self::with_credentials(None, None, None, None, None, None, None, None, None, None)
-            .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))
+        Self::with_credentials(
+            None, None, None, None, None, None, None, None, None, None, None,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))
     }
 
     /// Creates a new [`BitmexHttpClient`] configured with credentials
@@ -852,6 +897,7 @@ impl BitmexHttpClient {
         recv_window_ms: Option<u64>,
         max_requests_per_second: Option<u32>,
         max_requests_per_minute: Option<u32>,
+        proxy_url: Option<String>,
     ) -> anyhow::Result<Self> {
         // Determine testnet from URL first to select correct environment variables
         let testnet = base_url.as_ref().is_some_and(|url| url.contains("testnet"));
@@ -863,8 +909,8 @@ impl BitmexHttpClient {
             ("BITMEX_API_KEY", "BITMEX_API_SECRET")
         };
 
-        let api_key = api_key.or_else(|| get_env_var(key_var).ok());
-        let api_secret = api_secret.or_else(|| get_env_var(secret_var).ok());
+        let api_key = get_or_env_var_opt(api_key, key_var);
+        let api_secret = get_or_env_var_opt(api_secret, secret_var);
 
         // If we're trying to create an authenticated client, we need both key and secret
         if api_key.is_some() && api_secret.is_none() {
@@ -886,6 +932,7 @@ impl BitmexHttpClient {
             recv_window_ms,
             max_requests_per_second,
             max_requests_per_minute,
+            proxy_url,
         )
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))
     }
@@ -902,6 +949,12 @@ impl BitmexHttpClient {
         self.inner.credential.as_ref().map(|c| c.api_key.as_str())
     }
 
+    /// Returns a masked version of the API key for logging purposes.
+    #[must_use]
+    pub fn api_key_masked(&self) -> Option<String> {
+        self.inner.credential.as_ref().map(|c| c.api_key_masked())
+    }
+
     /// Requests the current server time from BitMEX.
     ///
     /// Returns the BitMEX system time as a Unix timestamp in milliseconds.
@@ -909,8 +962,8 @@ impl BitmexHttpClient {
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or if the response cannot be parsed.
-    pub async fn http_get_server_time(&self) -> Result<u64, BitmexHttpError> {
-        self.inner.http_get_server_time().await
+    pub async fn get_server_time(&self) -> Result<u64, BitmexHttpError> {
+        self.inner.get_server_time().await
     }
 
     /// Generates a timestamp for initialization.
@@ -1000,37 +1053,33 @@ impl BitmexHttpClient {
 
                 if !linked.is_empty() {
                     if let Some(parent_id) = order_list_parents.get(&order_list_id) {
-                        if client_order_id != *parent_id {
-                            linked.sort_by_key(
-                                |candidate| {
-                                    if candidate == parent_id { 0 } else { 1 }
-                                },
-                            );
-                            report.parent_order_id = Some(*parent_id);
-                        } else {
+                        if client_order_id == *parent_id {
                             report.parent_order_id = None;
+                        } else {
+                            linked.sort_by_key(|candidate| i32::from(candidate != parent_id));
+                            report.parent_order_id = Some(*parent_id);
                         }
                     } else {
                         report.parent_order_id = None;
                     }
 
-                    tracing::trace!(
-                        client_order_id = ?client_order_id,
-                        order_list_id = ?order_list_id,
-                        contingency_type = ?report.contingency_type,
-                        linked_order_ids = ?linked,
-                        "BitMEX linked ids sourced from order list id",
+                    log::trace!(
+                        "BitMEX linked ids sourced from order list id: client_order_id={:?}, order_list_id={:?}, contingency_type={:?}, linked_order_ids={:?}",
+                        client_order_id,
+                        order_list_id,
+                        report.contingency_type,
+                        linked,
                     );
                     report.linked_order_ids = Some(linked);
                     continue;
                 }
 
-                tracing::trace!(
-                    client_order_id = ?client_order_id,
-                    order_list_id = ?order_list_id,
-                    contingency_type = ?report.contingency_type,
-                    order_list_group = ?group,
-                    "BitMEX order list id group had no peers",
+                log::trace!(
+                    "BitMEX order list id group had no peers: client_order_id={:?}, order_list_id={:?}, contingency_type={:?}, order_list_group={:?}",
+                    client_order_id,
+                    order_list_id,
+                    report.contingency_type,
+                    group,
                 );
                 report.parent_order_id = None;
             } else if report.order_list_id.is_none() {
@@ -1048,37 +1097,33 @@ impl BitmexHttpClient {
 
                 if !linked.is_empty() {
                     if let Some(parent_id) = prefix_parents.get(base) {
-                        if client_order_id != *parent_id {
-                            linked.sort_by_key(
-                                |candidate| {
-                                    if candidate == parent_id { 0 } else { 1 }
-                                },
-                            );
-                            report.parent_order_id = Some(*parent_id);
-                        } else {
+                        if client_order_id == *parent_id {
                             report.parent_order_id = None;
+                        } else {
+                            linked.sort_by_key(|candidate| i32::from(candidate != parent_id));
+                            report.parent_order_id = Some(*parent_id);
                         }
                     } else {
                         report.parent_order_id = None;
                     }
 
-                    tracing::trace!(
-                        client_order_id = ?client_order_id,
-                        contingency_type = ?report.contingency_type,
-                        base = base,
-                        linked_order_ids = ?linked,
-                        "BitMEX linked ids constructed from client order id prefix",
+                    log::trace!(
+                        "BitMEX linked ids constructed from client order id prefix: client_order_id={:?}, contingency_type={:?}, base={}, linked_order_ids={:?}",
+                        client_order_id,
+                        report.contingency_type,
+                        base,
+                        linked,
                     );
                     report.linked_order_ids = Some(linked);
                     continue;
                 }
 
-                tracing::trace!(
-                    client_order_id = ?client_order_id,
-                    contingency_type = ?report.contingency_type,
-                    base = base,
-                    prefix_group = ?group,
-                    "BitMEX client order id prefix group had no peers",
+                log::trace!(
+                    "BitMEX client order id prefix group had no peers: client_order_id={:?}, contingency_type={:?}, base={}, prefix_group={:?}",
+                    client_order_id,
+                    report.contingency_type,
+                    base,
+                    group,
                 );
                 report.parent_order_id = None;
             } else if client_order_id.as_str().contains('-') {
@@ -1086,11 +1131,11 @@ impl BitmexHttpClient {
             }
 
             if Self::is_contingent_order(report.contingency_type) {
-                tracing::warn!(
-                    client_order_id = ?report.client_order_id,
-                    order_list_id = ?report.order_list_id,
-                    contingency_type = ?report.contingency_type,
-                    "BitMEX order status report missing linked ids after grouping",
+                log::warn!(
+                    "BitMEX order status report missing linked ids after grouping: client_order_id={:?}, order_list_id={:?}, contingency_type={:?}",
+                    report.client_order_id,
+                    report.order_list_id,
+                    report.contingency_type,
                 );
                 report.contingency_type = ContingencyType::NoContingency;
                 report.parent_order_id = None;
@@ -1110,16 +1155,20 @@ impl BitmexHttpClient {
         self.inner.cancellation_token().clone()
     }
 
-    /// Adds an instrument to the cache for precision lookups.
+    /// Caches a single instrument.
     ///
-    /// # Panics
-    ///
-    /// Panics if the instruments cache mutex is poisoned.
-    pub fn add_instrument(&self, instrument: InstrumentAny) {
+    /// Any existing instrument with the same symbol will be replaced.
+    pub fn cache_instrument(&self, instrument: InstrumentAny) {
         self.instruments_cache
-            .lock()
-            .unwrap()
             .insert(instrument.raw_symbol().inner(), instrument);
+        self.cache_initialized.store(true, Ordering::Release);
+    }
+
+    /// Gets an instrument from the cache by symbol.
+    pub fn get_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
+        self.instruments_cache
+            .get(symbol)
+            .map(|entry| entry.value().clone())
     }
 
     /// Request a single instrument and parse it into a Nautilus type.
@@ -1127,7 +1176,7 @@ impl BitmexHttpClient {
     /// # Errors
     ///
     /// Returns `Ok(Some(..))` when the venue returns a definition that parses
-    /// successfully, `Ok(None)` when the instrument is unknown or the payload
+    /// successfully, `Ok(None)` when the instrument is unknown, unsupported, or the payload
     /// cannot be converted into a Nautilus `Instrument`.
     pub async fn request_instrument(
         &self,
@@ -1135,7 +1184,7 @@ impl BitmexHttpClient {
     ) -> anyhow::Result<Option<InstrumentAny>> {
         let response = self
             .inner
-            .http_get_instrument(instrument_id.symbol.as_str())
+            .get_instrument(instrument_id.symbol.as_str())
             .await?;
 
         let instrument = match response {
@@ -1145,7 +1194,32 @@ impl BitmexHttpClient {
 
         let ts_init = self.generate_ts_init();
 
-        Ok(parse_instrument_any(&instrument, ts_init))
+        match parse_instrument_any(&instrument, ts_init) {
+            InstrumentParseResult::Ok(inst) => Ok(Some(*inst)),
+            InstrumentParseResult::Unsupported {
+                symbol,
+                instrument_type,
+            } => {
+                log::debug!(
+                    "Instrument {symbol} has unsupported type {instrument_type:?}, returning None"
+                );
+                Ok(None)
+            }
+            InstrumentParseResult::Inactive { symbol, state } => {
+                log::debug!("Instrument {symbol} is inactive (state={state}), returning None");
+                Ok(None)
+            }
+            InstrumentParseResult::Failed {
+                symbol,
+                instrument_type,
+                error,
+            } => {
+                log::error!(
+                    "Failed to parse instrument {symbol} (type={instrument_type:?}): {error}"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Request all available instruments and parse them into Nautilus types.
@@ -1157,32 +1231,61 @@ impl BitmexHttpClient {
         &self,
         active_only: bool,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
-        let instruments = self.inner.http_get_instruments(active_only).await?;
+        let instruments = self.inner.get_instruments(active_only).await?;
         let ts_init = self.generate_ts_init();
 
         let mut parsed_instruments = Vec::new();
+        let mut skipped_count = 0;
+        let mut inactive_count = 0;
         let mut failed_count = 0;
         let total_count = instruments.len();
 
         for inst in instruments {
-            if let Some(instrument_any) = parse_instrument_any(&inst, ts_init) {
-                parsed_instruments.push(instrument_any);
-            } else {
-                failed_count += 1;
-                tracing::error!(
-                    "Failed to parse instrument: symbol={}, type={:?}, state={:?} - instrument will not be cached",
-                    inst.symbol,
-                    inst.instrument_type,
-                    inst.state
-                );
+            match parse_instrument_any(&inst, ts_init) {
+                InstrumentParseResult::Ok(instrument_any) => {
+                    parsed_instruments.push(*instrument_any);
+                }
+                InstrumentParseResult::Unsupported {
+                    symbol,
+                    instrument_type,
+                } => {
+                    skipped_count += 1;
+                    log::debug!(
+                        "Skipping unsupported instrument type: symbol={symbol}, type={instrument_type:?}"
+                    );
+                }
+                InstrumentParseResult::Inactive { symbol, state } => {
+                    inactive_count += 1;
+                    log::debug!("Skipping inactive instrument: symbol={symbol}, state={state}");
+                }
+                InstrumentParseResult::Failed {
+                    symbol,
+                    instrument_type,
+                    error,
+                } => {
+                    failed_count += 1;
+                    log::error!(
+                        "Failed to parse instrument: symbol={symbol}, type={instrument_type:?}, error={error}"
+                    );
+                }
             }
         }
 
+        if skipped_count > 0 {
+            log::info!(
+                "Skipped {skipped_count} unsupported instrument type(s) out of {total_count} total"
+            );
+        }
+
+        if inactive_count > 0 {
+            log::info!(
+                "Skipped {inactive_count} inactive instrument(s) out of {total_count} total"
+            );
+        }
+
         if failed_count > 0 {
-            tracing::error!(
-                "Instrument parse failures: {} failed out of {} total ({}  successfully parsed)",
-                failed_count,
-                total_count,
+            log::error!(
+                "Instrument parse failures: {failed_count} failed out of {total_count} total ({} successfully parsed)",
                 parsed_instruments.len()
             );
         }
@@ -1201,7 +1304,7 @@ impl BitmexHttpClient {
     /// Panics if the inner mutex is poisoned.
     pub async fn get_wallet(&self) -> Result<BitmexWallet, BitmexHttpError> {
         let inner = self.inner.clone();
-        inner.http_get_wallet().await
+        inner.get_wallet().await
     }
 
     /// Get user orders.
@@ -1218,90 +1321,16 @@ impl BitmexHttpClient {
         params: GetOrderParams,
     ) -> Result<Vec<BitmexOrder>, BitmexHttpError> {
         let inner = self.inner.clone();
-        inner.http_get_orders(params).await
+        inner.get_orders(params).await
     }
 
-    /// Place a new order with raw API params.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if credentials are missing, the request fails, order validation fails, or the API returns an error.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
-    pub async fn http_place_order(
-        &self,
-        params: PostOrderParams,
-    ) -> Result<Value, BitmexHttpError> {
-        let inner = self.inner.clone();
-        inner.http_place_order(params).await
-    }
-
-    /// Cancel user orders with raw API params.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if credentials are missing, the request fails, the order doesn't exist, or the API returns an error.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
-    pub async fn http_cancel_orders(
-        &self,
-        params: DeleteOrderParams,
-    ) -> Result<Value, BitmexHttpError> {
-        let inner = self.inner.clone();
-        inner.http_cancel_orders(params).await
-    }
-
-    /// Amend an existing order with raw API params.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if credentials are missing, the request fails, the order doesn't exist, or the API returns an error.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
-    pub async fn http_amend_order(&self, params: PutOrderParams) -> Result<Value, BitmexHttpError> {
-        let inner = self.inner.clone();
-        inner.http_amend_order(params).await
-    }
-
-    /// Cancel all orders with raw API params.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if credentials are missing, the request fails, or the API returns an error.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner mutex is poisoned.
-    ///
-    /// # References
-    ///
-    /// <https://www.bitmex.com/api/explorer/#!/Order/Order_cancelAll>
-    pub async fn http_cancel_all_orders(
-        &self,
-        params: DeleteAllOrdersParams,
-    ) -> Result<Value, BitmexHttpError> {
-        let inner = self.inner.clone();
-        inner.http_cancel_all_orders(params).await
-    }
-
-    /// Get price precision for a symbol from the instruments cache (if found).
+    /// Get instrument from the instruments cache (if found).
     ///
     /// # Errors
     ///
     /// Returns an error if the instrument is not found in the cache.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the instruments cache mutex is poisoned.
     fn instrument_from_cache(&self, symbol: Ustr) -> anyhow::Result<InstrumentAny> {
-        let cache = self.instruments_cache.lock().expect(MUTEX_POISONED);
-        cache.get(&symbol).cloned().ok_or_else(|| {
+        self.get_instrument(&symbol).ok_or_else(|| {
             anyhow::anyhow!(
                 "Instrument {symbol} not found in cache, ensure instruments loaded first"
             )
@@ -1324,9 +1353,9 @@ impl BitmexHttpClient {
     /// # Errors
     ///
     /// Returns an error if credentials are missing, the request fails, or the API returns an error.
-    pub async fn http_get_margin(&self, currency: &str) -> anyhow::Result<BitmexMargin> {
+    pub async fn get_margin(&self, currency: &str) -> anyhow::Result<BitmexMargin> {
         self.inner
-            .http_get_margin(currency)
+            .get_margin(currency)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
@@ -1343,13 +1372,12 @@ impl BitmexHttpClient {
         // Get margin data for XBt (Bitcoin) by default
         let margin = self
             .inner
-            .http_get_margin("XBt")
+            .get_margin("XBt")
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        let ts_init = nautilus_core::nanos::UnixNanos::from(
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64,
-        );
+        let ts_init =
+            UnixNanos::from(chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64);
 
         // Convert HTTP Margin to WebSocket MarginMsg for parsing
         let margin_msg = BitmexMarginMsg {
@@ -1480,11 +1508,11 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_place_order(params).await?;
+        let response = self.inner.place_order(params).await?;
 
         let order: BitmexOrder = serde_json::from_value(response)?;
 
-        if let Some(BitmexOrderStatus::Rejected) = order.ord_status {
+        if order.ord_status == Some(BitmexOrderStatus::Rejected) {
             let reason = order
                 .ord_rej_reason
                 .map_or_else(|| "No reason provided".to_string(), |r| r.to_string());
@@ -1525,7 +1553,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_cancel_orders(params).await?;
+        let response = self.inner.cancel_orders(params).await?;
 
         let orders: Vec<BitmexOrder> = serde_json::from_value(response)?;
         let order = orders
@@ -1585,7 +1613,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_cancel_orders(params).await?;
+        let response = self.inner.cancel_orders(params).await?;
 
         let orders: Vec<BitmexOrder> = serde_json::from_value(response)?;
 
@@ -1630,7 +1658,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_cancel_all_orders(params).await?;
+        let response = self.inner.cancel_all_orders(params).await?;
 
         let orders: Vec<BitmexOrder> = serde_json::from_value(response)?;
 
@@ -1694,11 +1722,11 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_amend_order(params).await?;
+        let response = self.inner.amend_order(params).await?;
 
         let order: BitmexOrder = serde_json::from_value(response)?;
 
-        if let Some(BitmexOrderStatus::Rejected) = order.ord_status {
+        if order.ord_status == Some(BitmexOrderStatus::Rejected) {
             let reason = order
                 .ord_rej_reason
                 .map_or_else(|| "No reason provided".to_string(), |r| r.to_string());
@@ -1744,7 +1772,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_orders(params).await?;
+        let response = self.inner.get_orders(params).await?;
 
         if response.is_empty() {
             return Ok(None);
@@ -1790,7 +1818,7 @@ impl BitmexHttpClient {
         params.count(1i32);
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_orders(params).await?;
+        let response = self.inner.get_orders(params).await?;
 
         let order = response
             .into_iter()
@@ -1839,7 +1867,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_orders(params).await?;
+        let response = self.inner.get_orders(params).await?;
 
         let ts_init = self.generate_ts_init();
 
@@ -1848,15 +1876,18 @@ impl BitmexHttpClient {
         for order in response {
             // Skip orders without symbol (can happen with query responses)
             let Some(symbol) = order.symbol else {
-                tracing::warn!("Order response missing symbol, skipping");
+                log::warn!("Order response missing symbol, skipping");
                 continue;
             };
 
-            let instrument = self.instrument_from_cache(symbol)?;
+            let Ok(instrument) = self.instrument_from_cache(symbol) else {
+                log::debug!("Skipping order report for instrument not in cache: symbol={symbol}");
+                continue;
+            };
 
             match parse_order_status_report(&order, &instrument, ts_init) {
                 Ok(report) => reports.push(report),
-                Err(e) => tracing::error!("Failed to parse order status report: {e}"),
+                Err(e) => log::error!("Failed to parse order status report: {e}"),
             }
         }
 
@@ -1898,10 +1929,8 @@ impl BitmexHttpClient {
         if let Some(limit) = limit {
             let clamped_limit = limit.min(1000);
             if limit > 1000 {
-                tracing::warn!(
-                    limit,
-                    clamped_limit,
-                    "BitMEX trade request limit exceeds venue maximum; clamping",
+                log::warn!(
+                    "BitMEX trade request limit exceeds venue maximum; clamping: limit={limit}, clamped_limit={clamped_limit}",
                 );
             }
             params.count(i32::try_from(clamped_limit).unwrap_or(1000));
@@ -1909,7 +1938,7 @@ impl BitmexHttpClient {
         params.reverse(false);
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_trades(params).await?;
+        let response = self.inner.get_trades(params).await?;
 
         let ts_init = self.generate_ts_init();
 
@@ -1932,7 +1961,7 @@ impl BitmexHttpClient {
 
             match parse_trade(trade, price_precision, ts_init) {
                 Ok(trade) => parsed_trades.push(trade),
-                Err(e) => tracing::error!("Failed to parse trade: {e}"),
+                Err(e) => log::error!("Failed to parse trade: {e}"),
             }
         }
 
@@ -2002,10 +2031,8 @@ impl BitmexHttpClient {
         if let Some(limit) = limit {
             let clamped_limit = limit.min(1000);
             if limit > 1000 {
-                tracing::warn!(
-                    limit,
-                    clamped_limit,
-                    "BitMEX bar request limit exceeds venue maximum; clamping",
+                log::warn!(
+                    "BitMEX bar request limit exceeds venue maximum; clamping: limit={limit}, clamped_limit={clamped_limit}",
                 );
             }
             params.count(i32::try_from(clamped_limit).unwrap_or(1000));
@@ -2013,7 +2040,7 @@ impl BitmexHttpClient {
         params.reverse(false);
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_trade_bucketed(params).await?;
+        let response = self.inner.get_trade_bucketed(params).await?;
         let ts_init = self.generate_ts_init();
         let mut bars = Vec::new();
 
@@ -2029,17 +2056,17 @@ impl BitmexHttpClient {
                 continue;
             }
             if bin.symbol != instrument_id.symbol.inner() {
-                tracing::warn!(
-                    symbol = %bin.symbol,
-                    expected = %instrument_id.symbol,
-                    "Skipping trade bin for unexpected symbol",
+                log::warn!(
+                    "Skipping trade bin for unexpected symbol: symbol={}, expected={}",
+                    bin.symbol,
+                    instrument_id.symbol,
                 );
                 continue;
             }
 
             match parse_trade_bin(bin, &instrument, &bar_type, ts_init) {
                 Ok(bar) => bars.push(bar),
-                Err(e) => tracing::warn!("Failed to parse trade bin: {e}"),
+                Err(e) => log::warn!("Failed to parse trade bin: {e}"),
             }
         }
 
@@ -2069,7 +2096,7 @@ impl BitmexHttpClient {
 
         let params = params.build().map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_executions(params).await?;
+        let response = self.inner.get_executions(params).await?;
 
         let ts_init = self.generate_ts_init();
 
@@ -2078,7 +2105,7 @@ impl BitmexHttpClient {
         for exec in response {
             // Skip executions without symbol (e.g., CancelReject)
             let Some(symbol) = exec.symbol else {
-                tracing::debug!("Skipping execution without symbol: {:?}", exec.exec_type);
+                log::debug!("Skipping execution without symbol: {:?}", exec.exec_type);
                 continue;
             };
             let symbol_str = symbol.to_string();
@@ -2086,7 +2113,9 @@ impl BitmexHttpClient {
             let instrument = match self.instrument_from_cache(symbol) {
                 Ok(instrument) => instrument,
                 Err(e) => {
-                    tracing::error!(symbol = %symbol_str, "Instrument not found in cache for execution parsing: {e}");
+                    log::error!(
+                        "Instrument not found in cache for execution parsing: symbol={symbol_str}, {e}"
+                    );
                     continue;
                 }
             };
@@ -2099,9 +2128,9 @@ impl BitmexHttpClient {
                     if error_msg.starts_with("Skipping non-trade execution")
                         || error_msg.starts_with("Skipping execution without order_id")
                     {
-                        tracing::debug!("{e}");
+                        log::debug!("{e}");
                     } else {
-                        tracing::error!("Failed to parse fill report: {e}");
+                        log::error!("Failed to parse fill report: {e}");
                     }
                 }
             }
@@ -2123,20 +2152,20 @@ impl BitmexHttpClient {
             .build()
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        let response = self.inner.http_get_positions(params).await?;
+        let response = self.inner.get_positions(params).await?;
 
         let ts_init = self.generate_ts_init();
 
         let mut reports = Vec::new();
 
         for pos in response {
-            let symbol = Ustr::from(pos.symbol.as_str());
+            let symbol = pos.symbol;
             let instrument = match self.instrument_from_cache(symbol) {
                 Ok(instrument) => instrument,
                 Err(e) => {
-                    tracing::error!(
-                        symbol = pos.symbol.as_str(),
-                        "Instrument not found in cache for position parsing: {e}"
+                    log::error!(
+                        "Instrument not found in cache for position parsing: symbol={}, {e}",
+                        pos.symbol.as_str(),
                     );
                     continue;
                 }
@@ -2144,7 +2173,7 @@ impl BitmexHttpClient {
 
             match parse_position_report(pos, &instrument, ts_init) {
                 Ok(report) => reports.push(report),
-                Err(e) => tracing::error!("Failed to parse position report: {e}"),
+                Err(e) => log::error!("Failed to parse position report: {e}"),
             }
         }
 
@@ -2169,7 +2198,7 @@ impl BitmexHttpClient {
             target_account_id: None,
         };
 
-        let response = self.inner.http_update_position_leverage(params).await?;
+        let response = self.inner.update_position_leverage(params).await?;
 
         let instrument = self.instrument_from_cache(Ustr::from(symbol))?;
         let ts_init = self.generate_ts_init();
@@ -2177,10 +2206,6 @@ impl BitmexHttpClient {
         parse_position_report(response, &instrument, ts_init)
     }
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
@@ -2223,7 +2248,7 @@ mod tests {
 
     #[rstest]
     fn test_sign_request_generates_correct_headers() {
-        let client = BitmexHttpInnerClient::with_credentials(
+        let client = BitmexRawHttpClient::with_credentials(
             "test_api_key".to_string(),
             "test_api_secret".to_string(),
             "http://localhost:8080".to_string(),
@@ -2234,6 +2259,7 @@ mod tests {
             None, // recv_window_ms
             None, // max_requests_per_second
             None, // max_requests_per_minute
+            None, // proxy_url
         )
         .expect("Failed to create test client");
 
@@ -2249,7 +2275,7 @@ mod tests {
 
     #[rstest]
     fn test_sign_request_with_body() {
-        let client = BitmexHttpInnerClient::with_credentials(
+        let client = BitmexRawHttpClient::with_credentials(
             "test_api_key".to_string(),
             "test_api_secret".to_string(),
             "http://localhost:8080".to_string(),
@@ -2260,6 +2286,7 @@ mod tests {
             None, // recv_window_ms
             None, // max_requests_per_second
             None, // max_requests_per_minute
+            None, // proxy_url
         )
         .expect("Failed to create test client");
 
@@ -2282,7 +2309,7 @@ mod tests {
 
     #[rstest]
     fn test_sign_request_uses_custom_recv_window() {
-        let client_default = BitmexHttpInnerClient::with_credentials(
+        let client_default = BitmexRawHttpClient::with_credentials(
             "test_api_key".to_string(),
             "test_api_secret".to_string(),
             "http://localhost:8080".to_string(),
@@ -2293,10 +2320,11 @@ mod tests {
             None, // Use default recv_window_ms (10000ms = 10s)
             None, // max_requests_per_second
             None, // max_requests_per_minute
+            None, // proxy_url
         )
         .expect("Failed to create test client");
 
-        let client_custom = BitmexHttpInnerClient::with_credentials(
+        let client_custom = BitmexRawHttpClient::with_credentials(
             "test_api_key".to_string(),
             "test_api_secret".to_string(),
             "http://localhost:8080".to_string(),
@@ -2307,6 +2335,7 @@ mod tests {
             Some(30_000), // 30 seconds
             None,         // max_requests_per_second
             None,         // max_requests_per_minute
+            None,         // proxy_url
         )
         .expect("Failed to create test client");
 
