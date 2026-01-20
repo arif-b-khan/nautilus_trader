@@ -12,7 +12,6 @@ on:
 
 jobs:
   pre-commit:
-    if: false
     runs-on: ubuntu-22.04 # (glibc 2.35) wider runtime range than 24.04/glibc 2.39
     steps:
       # https://github.com/step-security/harden-runner
@@ -161,7 +160,8 @@ jobs:
         shell: bash
     name: build - python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # removed dependency on `pre-commit` to allow builds without that job
+    needs:
+      - pre-commit
     env:
       BUILD_MODE: release
       RUST_BACKTRACE: 1
@@ -262,7 +262,8 @@ jobs:
         || (github.event_name == 'pull_request' &&
           github.base_ref == 'develop')
       )
-    # removed dependency on `pre-commit` to allow builds without that job
+    needs:
+      - pre-commit
     env:
       BUILD_MODE: release
       RUST_BACKTRACE: 1
@@ -355,7 +356,8 @@ jobs:
         shell: bash
     name: build - python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # removed dependency on `pre-commit` to allow builds without that job
+    needs:
+      - pre-commit
     env:
       BUILD_MODE: release
       RUST_BACKTRACE: 1
@@ -411,7 +413,8 @@ jobs:
         shell: bash
     name: build - python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # removed dependency on `pre-commit` to allow builds without that job
+    needs:
+      - pre-commit
     env:
       BUILD_MODE: release
       HIGH_PRECISION: false
