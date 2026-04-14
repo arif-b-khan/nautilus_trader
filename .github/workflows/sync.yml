@@ -26,6 +26,10 @@ on:
     - cron: '0 3 * * *'    # Daily at 03:00 UTC
   workflow_dispatch:         # Allow manual trigger at any time
 
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   # ----------------------------------------------------------------
   # Job 1: Reset fork's `develop` to exactly match upstream/develop
@@ -37,9 +41,14 @@ jobs:
       contents: write
     outputs:
       synced: ${{ steps.sync.outputs.synced }}
-      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
 
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
       - name: Validate PAT_TOKEN secret is set
         run: |
           if [ -z "${{ secrets.PAT_TOKEN }}" ]; then
@@ -55,7 +64,7 @@ jobs:
           echo "PAT_TOKEN is configured."
 
       - name: Checkout fork's develop branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: develop
           fetch-depth: 0
@@ -92,21 +101,24 @@ jobs:
           fi
 
       - name: Reset develop to upstream/develop
-        id: sync
+        id: reset
         if: steps.check.outputs.already_in_sync == 'false'
         run: |
           git checkout develop
           git reset --hard upstream/develop
           git push origin develop --force-with-lease
-          echo "synced=true" >> $GITHUB_OUTPUT
-          echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> $GITHUB_OUTPUT
           echo "Successfully synced develop to upstream $(git rev-parse --short HEAD)."
 
-      - name: No sync needed
-        if: steps.check.outputs.already_in_sync == 'true'
+      - name: Record sync outputs
+        id: sync
         run: |
-          echo "synced=false" >> $GITHUB_OUTPUT
           echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> $GITHUB_OUTPUT
+          if [ "${{ steps.check.outputs.already_in_sync }}" = "true" ]; then
+            echo "synced=false" >> $GITHUB_OUTPUT
+            echo "No sync needed."
+          else
+            echo "synced=true" >> $GITHUB_OUTPUT
+          fi
 
   # ----------------------------------------------------------------
   # Job 2: Create or update a PR from develop → main so you can
@@ -122,10 +134,16 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check if develop is ahead of main
         id: check_ahead

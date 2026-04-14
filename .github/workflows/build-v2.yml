@@ -61,7 +61,7 @@ jobs:
       # License compliance is verified manually until this is resolved upstream.
       # See deny.toml for documented exception and tracking.
       - name: Run cargo-deny (advisories, sources, bans)
-        uses: EmbarkStudios/cargo-deny-action@v2 # latest v2 (supports CVSS 4.0)
+        uses: EmbarkStudios/cargo-deny-action@175dc7fd4fb85ec8f46948fb98f44db001149081 # v2.0.16 (supports CVSS 4.0)
         with:
           arguments: --all-features
           command: check advisories sources bans
