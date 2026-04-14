@@ -60,7 +60,7 @@ jobs:
           ref: develop
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN }}
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
