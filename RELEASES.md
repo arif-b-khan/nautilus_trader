@@ -1,6 +1,31 @@
-# NautilusTrader 1.221.0 Beta
+# NautilusTrader 1.222.0 Beta
 
 Released on TBD (UTC).
+
+### Enhancements
+- Added initial backtest visualization tearsheets with plotly
+- Added `CAGR` portfolio statistic
+- Added `CalmarRatio` portfolio statistic
+- Added `MaxDrawdown` portfolio statistic
+
+### Breaking Changes
+- Dropped support for Python 3.11
+
+### Security
+
+### Fixes
+
+### Internal Improvements
+
+### Documentation Updates
+
+### Deprecations
+
+---
+
+# NautilusTrader 1.221.0 Beta
+
+Released on 26th October 2025 (UTC).
 
 This will be the final release with support for Python 3.11.
 
@@ -117,6 +142,7 @@ This will be the final release with support for Python 3.11.
 - Fixed OKX fee calculations to account for negative fees
 - Fixed OKX parsing for `tick_sz` across instrument types
 - Fixed OKX parsing for instruments `multiplier` field
+- Fixed OKX WebSocket heartbeat and standardize logging
 - Fixed Polymarket handling of one-sided quotes (#2950), thanks for reporting @thefabus
 - Fixed Polymarket websocket message handling (#2963, #2968), thanks @thefabus
 - Fixed Polymarket tick size change handling for quotes (#2980), thanks for reporting @santivazq
@@ -133,6 +159,7 @@ This will be the final release with support for Python 3.11.
 - Added OKX adapter integration tests
 - Added turmoil network simulation testing to network crate
 - Added liquidity utilization rate to AMM pool profiler (#3107), thanks @filipmacek
+- Added `filter_sec_types` config to skip unsupported IB instrument types (#3108), thanks @sunlei
 - Ported `PortfolioAnalyzer` and all portfolio statistics to Rust
 - Introduced AMM Pool profiler with tickmaps and Uniswapv3 support (#3000, #3010, #3019, #3036), thanks @filipmacek
 - Introduced snapshot, analytics, and PSQL schema for PoolProfiler (#3048), thanks @filipmacek
