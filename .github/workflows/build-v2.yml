@@ -55,6 +55,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reset and update Rust toolchain
+        run: bash scripts/ci/install-rust.sh
+
+      - name: Get Rust toolchain version
+        id: rust-toolchain
+        run: |
+          echo "toolchain=$(bash scripts/rust-toolchain.sh)" >> $GITHUB_OUTPUT
+
+      # https://github.com/actions-rust-lang/setup-rust-toolchain
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ac90e63697ac2784f4ecfe2964e1a285c304003a # v1.14.1
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
+          components: clippy,rustfmt
+          override: true
+
       # https://github.com/EmbarkStudios/cargo-deny-action
       # NOTE: License checking is disabled due to implied-vol crate not declaring
       # its license in Cargo.toml (has MIT LICENSE file but shows as "unlicensed").
