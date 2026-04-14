@@ -37,8 +37,7 @@ jobs:
   sync-develop:
     name: Sync develop from upstream
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: {}
     outputs:
       synced: ${{ steps.sync.outputs.synced }}
       upstream_sha: ${{ steps.check.outputs.upstream_sha }}
@@ -86,8 +85,11 @@ jobs:
       - name: Check if sync is needed
         id: check
         run: |
+          set -euo pipefail
           UPSTREAM_SHA=$(git rev-parse upstream/develop)
           ORIGIN_SHA=$(git rev-parse origin/develop)
+          test -n "$UPSTREAM_SHA"
+          test -n "$ORIGIN_SHA"
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
           echo "origin_sha=$ORIGIN_SHA"
           echo "upstream_sha=$UPSTREAM_SHA"
@@ -104,6 +106,7 @@ jobs:
         id: reset
         if: steps.check.outputs.already_in_sync == 'false'
         run: |
+          set -euo pipefail
           git checkout develop
           git reset --hard upstream/develop
           git push origin develop --force-with-lease
@@ -143,7 +146,7 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
-          persist-credentials: false
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check if develop is ahead of main
         id: check_ahead

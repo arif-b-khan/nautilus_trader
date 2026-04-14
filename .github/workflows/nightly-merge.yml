@@ -12,6 +12,7 @@ on:
 
 jobs:
   check-develop-status:
+    if: github.repository_owner == 'nautechsystems'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,7 +114,7 @@ jobs:
 
   nightly-merge:
     needs: check-develop-status
-    if: needs.check-develop-status.outputs.has_changes == 'true'
+    if: github.repository_owner == 'nautechsystems' && needs.check-develop-status.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     steps:
       # https://github.com/step-security/harden-runner
