@@ -7,8 +7,8 @@ permissions: # Principle of least privilege
 on:
   push:
     branches: [nightly-merge-test]
-  schedule:
-    - cron: '0 14 * * *' # At 14:00 UTC daily
+  # schedule removed: this workflow requires NIGHTLY_TOKEN which only
+  # exists in the nautechsystems org. It is not needed in a fork.
 
 jobs:
   check-develop-status:
