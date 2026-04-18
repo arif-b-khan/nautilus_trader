@@ -76,7 +76,7 @@ jobs:
         uses: ./.github/actions/common-setup
         with:
           python-version: "3.12"
-          free-disk-space: "true"
+          free-disk-space: "false"
 
       - name: Prune unused Docker images
         if: runner.os == 'Linux'

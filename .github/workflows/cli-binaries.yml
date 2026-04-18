@@ -35,13 +35,11 @@ jobs:
         uses: ./.github/actions/common-setup
         with:
           python-version: "3.13"
-          free-disk-space: "true"
+          free-disk-space: "false"
 
-      - name: Build CLI (all features)
+      - name: Build CLI (debug)
         run: |
-          cargo build --release -p nautilus-cli --bin nautilus --all-features
-
-      - name: Strip binary
+          cargo build -p nautilus-cli --bin nautilus --all-features
         run: |
           strip target/release/nautilus || true
 
@@ -87,7 +85,7 @@ jobs:
         uses: ./.github/actions/common-setup
         with:
           python-version: "3.13"
-          free-disk-space: "true"
+          free-disk-space: "false"
 
       - name: Build CLI (all features)
         run: |
@@ -190,7 +188,7 @@ jobs:
         uses: ./.github/actions/common-setup
         with:
           python-version: "3.13"
-          free-disk-space: "true"
+          free-disk-space: "false"
 
       - name: Build CLI (all features)
         run: |
