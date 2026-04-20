@@ -130,6 +130,29 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Common setup
+        uses: ./.github/actions/common-setup
+        with:
+          python-version: ${{ matrix.python-version }}
+          free-disk-space: "false"
+
+      - name: Install Nautilus CLI
+        env:
+          NAUTILUS_CLI_FORCE_SOURCE: ${{ github.ref == 'refs/heads/nightly' && '1' || '0' }}
+        run: bash scripts/ci/install-nautilus-cli.sh
+
+      - name: Init postgres schema
+        run: nautilus database init --schema ${{ github.workspace }}/schema/sql
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USERNAME: postgres
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DATABASE: nautilus
+
+      - name: Cached test data
+        uses: ./.github/actions/common-test-data
+
       - name: Run Rust tests
         run: make cargo-test-hypersync
 
@@ -201,6 +224,38 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+
+      - name: Common setup
+        uses: ./.github/actions/common-setup
+        with:
+          python-version: ${{ matrix.python-version }}
+          free-disk-space: "false"
+
+      - name: Install Nautilus CLI
+        env:
+          NAUTILUS_CLI_FORCE_SOURCE: ${{ github.ref == 'refs/heads/nightly' && '1' || '0' }}
+        run: bash scripts/ci/install-nautilus-cli.sh
+
+      - name: Init postgres schema
+        run: nautilus database init --schema ${{ github.workspace }}/schema/sql
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USERNAME: postgres
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DATABASE: nautilus
+
+      - name: Cached test data
+        uses: ./.github/actions/common-test-data
+
+      - name: Run Rust tests
+        run: make cargo-test-hypersync
+
+      - name: Build and install wheel
+        uses: ./.github/actions/common-wheel-build
+        with:
+          python-version: ${{ matrix.python-version }}
+          github_ref: ${{ github.ref }}
 
       - name: Run tests
         run: |

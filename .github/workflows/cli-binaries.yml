@@ -37,9 +37,11 @@ jobs:
           python-version: "3.13"
           free-disk-space: "false"
 
-      - name: Build CLI (debug)
+      - name: Build CLI (all features)
         run: |
-          cargo build -p nautilus-cli --bin nautilus --all-features
+          cargo build --release -p nautilus-cli --bin nautilus --all-features
+
+      - name: Strip binary
         run: |
           strip target/release/nautilus || true
 
