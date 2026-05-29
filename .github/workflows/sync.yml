@@ -55,7 +55,7 @@ jobs:
           echo "PAT_TOKEN is configured."
 
       - name: Checkout fork's develop branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           ref: develop
           fetch-depth: 0
@@ -63,11 +63,14 @@ jobs:
           persist-credentials: false
 
       - name: Configure git identity
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # Set push URL to use the PAT so workflow file pushes are allowed
-          git remote set-url origin https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git
+          git remote set-url origin \
+            "https://x-access-token:${PAT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Fetch upstream develop
         run: |
@@ -79,14 +82,14 @@ jobs:
         run: |
           UPSTREAM_SHA=$(git rev-parse upstream/develop)
           ORIGIN_SHA=$(git rev-parse origin/develop)
-          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "origin_sha=$ORIGIN_SHA"
           echo "upstream_sha=$UPSTREAM_SHA"
           if [ "$UPSTREAM_SHA" = "$ORIGIN_SHA" ]; then
-            echo "already_in_sync=true" >> $GITHUB_OUTPUT
+            echo "already_in_sync=true" >> "$GITHUB_OUTPUT"
             echo "develop is already up to date with upstream."
           else
-            echo "already_in_sync=false" >> $GITHUB_OUTPUT
+            echo "already_in_sync=false" >> "$GITHUB_OUTPUT"
             BEHIND=$(git rev-list --count origin/develop..upstream/develop)
             echo "develop is $BEHIND commits behind upstream/develop."
           fi
@@ -98,15 +101,15 @@ jobs:
           git checkout develop
           git reset --hard upstream/develop
           git push origin develop --force-with-lease
-          echo "synced=true" >> $GITHUB_OUTPUT
-          echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> $GITHUB_OUTPUT
+          echo "synced=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> "$GITHUB_OUTPUT"
           echo "Successfully synced develop to upstream $(git rev-parse --short HEAD)."
 
       - name: No sync needed
         if: steps.check.outputs.already_in_sync == 'true'
         run: |
-          echo "synced=false" >> $GITHUB_OUTPUT
-          echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> $GITHUB_OUTPUT
+          echo "synced=false" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${{ steps.check.outputs.upstream_sha }}" >> "$GITHUB_OUTPUT"
 
   # ----------------------------------------------------------------
   # Job 2: Create or update a PR from develop → main so you can
@@ -123,16 +126,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check if develop is ahead of main
         id: check_ahead
         run: |
           git fetch origin main develop
           AHEAD=$(git rev-list --count origin/main..origin/develop)
-          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
           echo "develop is $AHEAD commits ahead of main."
 
       - name: Check for existing open PR
@@ -141,14 +145,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR=$(gh pr list --base main --head develop --state open --json number,title --jq '.[0]')
+          PR=$(gh pr list \
+            --base main \
+            --head develop \
+            --state open \
+            --json number,title \
+            --jq '.[0]')
           if [ -n "$PR" ] && [ "$PR" != "null" ]; then
             PR_NUM=$(echo "$PR" | jq -r '.number')
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "pr_number=$PR_NUM" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
             echo "Existing PR #$PR_NUM found."
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create PR develop → main
@@ -180,8 +189,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BODY="Upstream sync updated — **$(date -u '+%Y-%m-%d %H:%M UTC')**"
+          BODY="$BODY | SHA: \`${{ needs.sync-develop.outputs.upstream_sha }}\`"
+          BODY="$BODY | ${{ steps.check_ahead.outputs.ahead }} commits ahead of main."
           gh pr comment ${{ steps.check_pr.outputs.pr_number }} \
-            --body "Upstream sync updated — **$(date -u '+%Y-%m-%d %H:%M UTC')** | SHA: \`${{ needs.sync-develop.outputs.upstream_sha }}\` | ${{ steps.check_ahead.outputs.ahead }} commits ahead of main."
+            --body "$BODY"
 
       - name: Already in sync
         if: steps.check_ahead.outputs.ahead == '0'
