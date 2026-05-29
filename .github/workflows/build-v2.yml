@@ -239,18 +239,18 @@ jobs:
           pip install --upgrade maturin
           maturin build --release --out ../dist
 
-      - name: Upload wheel artifact
-        uses: ./.github/actions/upload-artifact-wheel
-
   publish:
     needs:
       - build
     runs-on: ubuntu-latest
     # Only publish from mainline branches, never from test branches
     if: >
-      github.ref_name == 'develop' ||
-      github.ref_name == 'nightly' ||
-      github.ref_name == 'master'
+      github.repository == 'nautechsystems/nautilus_trader' &&
+      (
+        github.ref_name == 'develop' ||
+        github.ref_name == 'nightly' ||
+        github.ref_name == 'master'
+      )
     environment: r2-${{ github.ref_name }}
     permissions:
       actions: write # Required for deleting artifacts
