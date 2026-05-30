@@ -1,9 +1,57 @@
 # Scripts directory
 
 This directory contains assorted helper scripts used by NautilusTrader’s
-developer tooling and CI pipeline. Only one of them (`curate-dataset.sh`)
-needs a brief explanation because it is meant to be executed manually when
-curating test-fixture datasets.
+developer tooling and CI pipeline.
+
+---
+
+## `setup-dev.sh` / `setup-dev.ps1` - one-time local development setup
+
+These scripts install or verify the local prerequisites needed to build the
+project from source, sync Python dependencies, build NautilusTrader in debug
+mode, and verify that the local package imports.
+
+Linux and macOS:
+
+```bash
+./scripts/setup-dev.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\setup-dev.ps1
+```
+
+What the setup performs:
+
+- installs `uv` if it is missing
+- installs `rustup` if it is missing
+- installs the Rust version from `rust-toolchain.toml`
+- updates the `stable` Rust toolchain used by `build.py`
+- installs/checks platform build tools
+  - Linux: `clang`, `make`, and C/C++ build packages via the detected package manager
+  - macOS: Apple command line tools
+  - Windows: Visual Studio Build Tools with C++ tools via `winget`
+- runs `uv sync --all-groups --all-extras --inexact --no-install-package nautilus_trader`
+- runs `BUILD_MODE=debug uv run --no-sync build.py`
+- verifies `import nautilus_trader`
+
+The first build can take several minutes because it compiles Rust crates and
+Cython extensions. Re-running the script is safe; existing tools and cached
+build artifacts are reused where possible.
+
+After setup, you can run an existing backtest from the repository root:
+
+```bash
+printf '\n' | uv run --no-sync python examples/backtest/fx_ema_cross_audusd_ticks.py
+```
+
+---
+
+Only one of the remaining scripts (`curate-dataset.sh`) needs a brief
+explanation because it is meant to be executed manually when curating
+test-fixture datasets.
 
 ---
 
