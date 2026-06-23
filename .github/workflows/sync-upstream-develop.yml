@@ -1,0 +1,77 @@
+name: sync-upstream-develop
+
+permissions: # Principle of least privilege
+  contents: write
+  pull-requests: write
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # At 01:00 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-develop
+  cancel-in-progress: false
+
+jobs:
+  sync-and-open-pr:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPOSITORY: nautechsystems/nautilus_trader
+      DEVELOP_BRANCH: develop
+      MAIN_BRANCH: main
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync develop from upstream
+        run: |
+          set -euo pipefail
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          else
+            git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          fi
+
+          git fetch upstream "${DEVELOP_BRANCH}"
+          git fetch origin "${DEVELOP_BRANCH}"
+          git checkout "${DEVELOP_BRANCH}"
+
+          current_sha="$(git rev-parse HEAD)"
+          git merge --no-edit "upstream/${DEVELOP_BRANCH}"
+          updated_sha="$(git rev-parse HEAD)"
+
+          if [ "${current_sha}" != "${updated_sha}" ]; then
+            git push origin "${DEVELOP_BRANCH}"
+          fi
+
+      - name: Create or reuse PR from develop to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(gh pr list \
+            --base "${MAIN_BRANCH}" \
+            --head "${DEVELOP_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')"
+
+          if [ -z "${existing_pr}" ]; then
+            gh pr create \
+              --base "${MAIN_BRANCH}" \
+              --head "${DEVELOP_BRANCH}" \
+              --title "Sync ${DEVELOP_BRANCH} into ${MAIN_BRANCH}" \
+              --body "Automated daily sync PR from upstream ${DEVELOP_BRANCH} into ${MAIN_BRANCH}."
+          fi
