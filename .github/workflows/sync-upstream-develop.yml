@@ -45,14 +45,15 @@ jobs:
 
           git fetch upstream "${DEVELOP_BRANCH}"
           git fetch origin "${DEVELOP_BRANCH}"
-          git checkout "${DEVELOP_BRANCH}"
+          # Avoid ambiguous checkout when both origin/develop and upstream/develop exist.
+          git checkout -B "${DEVELOP_BRANCH}" "origin/${DEVELOP_BRANCH}"
 
           current_sha="$(git rev-parse HEAD)"
           git merge --no-edit "upstream/${DEVELOP_BRANCH}"
           updated_sha="$(git rev-parse HEAD)"
 
           if [ "${current_sha}" != "${updated_sha}" ]; then
-            git push origin "${DEVELOP_BRANCH}"
+            git push origin "HEAD:${DEVELOP_BRANCH}"
           fi
 
       - name: Create or reuse PR from develop to main
