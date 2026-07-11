@@ -54,7 +54,7 @@ class OpenAlgoExecClientConfig(LiveExecClientConfig, frozen=True):
 
     """
 
-    api_key: str | None = None
+    api_key: str | None = OPENALGO_DEFAULT_API_KEY
     base_url_http: str = OPENALGO_DEFAULT_BASE_URL
     base_url_ws: str = OPENALGO_DEFAULT_WS_URL
     api_version: str = OPENALGO_DEFAULT_API_VERSION

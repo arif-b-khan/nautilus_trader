@@ -21,7 +21,7 @@ from nautilus_trader.adapters.openalgo.http.client import OpenAlgoHttpError
 
 
 @pytest.mark.asyncio
-async def test_place_order_posts_openalgo_payload(aiohttp_server):
+async def test_place_order_posts_openalgo_sdk_payload(aiohttp_server):
     received = {}
 
     async def handler(request):
@@ -56,9 +56,6 @@ async def test_place_order_posts_openalgo_payload(aiohttp_server):
         "pricetype": "MARKET",
         "product": "MIS",
         "quantity": "1",
-        "price": "0",
-        "trigger_price": "0",
-        "disclosed_quantity": "0",
     }
 
 

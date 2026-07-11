@@ -13,17 +13,4 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-from __future__ import annotations
-
-from typing import Final
-
-from nautilus_trader.model.identifiers import ClientId
-
-
-OPENALGO: Final[str] = "OPENALGO"
-OPENALGO_CLIENT_ID: Final[ClientId] = ClientId(OPENALGO)
-OPENALGO_DEFAULT_BASE_URL: Final[str] = "http://127.0.0.1:5000"
-OPENALGO_DEFAULT_WS_URL: Final[str] = "ws://127.0.0.1:8765"
-OPENALGO_DEFAULT_API_VERSION: Final[str] = "v1"
-OPENALGO_DEFAULT_VENUE: Final[str] = "NSE"
-OPENALGO_DEFAULT_API_KEY: Final[str] = ""
+from nautilus_trader._libnautilus.openalgo import *  # noqa: F403 (undefined-local-with-import-star)

@@ -34,6 +34,7 @@ def get_cached_openalgo_http_client(
     api_key: str | None = None,
     base_url: str = "http://127.0.0.1:5000",
     api_version: str = "v1",
+    ws_url: str = "ws://127.0.0.1:8765",
     timeout_secs: int = 10,
     proxy_url: str | None = None,
 ) -> OpenAlgoHttpClient:
@@ -44,6 +45,7 @@ def get_cached_openalgo_http_client(
         api_key=api_key,
         base_url=base_url,
         api_version=api_version,
+        ws_url=ws_url,
         timeout_secs=timeout_secs,
         proxy_url=proxy_url,
     )
@@ -77,6 +79,7 @@ class OpenAlgoLiveExecClientFactory(LiveExecClientFactory):
             api_key=config.api_key,
             base_url=config.base_url_http,
             api_version=config.api_version,
+            ws_url=config.base_url_ws,
             timeout_secs=config.http_timeout_secs,
             proxy_url=config.http_proxy_url,
         )

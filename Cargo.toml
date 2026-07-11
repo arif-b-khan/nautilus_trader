@@ -20,6 +20,7 @@ members = [
   "crates/adapters/okx",
   "crates/adapters/polymarket",
   "crates/adapters/sandbox",
+  "crates/adapters/openalgo",
   "crates/adapters/tardis",
   "crates/analysis",
   "crates/backtest",
@@ -115,6 +116,7 @@ nautilus-lighter = { path = "crates/adapters/lighter", version = "0.61.0", defau
 nautilus-okx = { path = "crates/adapters/okx", version = "0.61.0", default-features = false }
 nautilus-polymarket = { path = "crates/adapters/polymarket", version = "0.61.0", default-features = false }
 nautilus-sandbox = { path = "crates/adapters/sandbox", version = "0.61.0", default-features = false }
+nautilus-openalgo = { path = "crates/adapters/openalgo", version = "0.61.0", default-features = false }
 nautilus-tardis = { path = "crates/adapters/tardis", version = "0.61.0", default-features = false }
 
 # -----------------------------------------------------------------------------
@@ -191,6 +193,7 @@ mimalloc = "0.1.52"
 object_store = { version = "0.13.2", default-features = false, features = [
   "fs",
 ] }
+openalgo = "=1.0.5"
 parquet = { version = "58.3.0", default-features = false, features = [
   "arrow",
   "async",

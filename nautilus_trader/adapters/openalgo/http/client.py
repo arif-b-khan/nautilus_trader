@@ -15,10 +15,10 @@
 
 from __future__ import annotations
 
-import os
+import json
 from typing import Any
 
-import aiohttp
+from nautilus_trader._libnautilus.openalgo import OpenAlgoHttpClient as RustOpenAlgoHttpClient
 
 
 class OpenAlgoHttpError(RuntimeError):
@@ -29,7 +29,7 @@ class OpenAlgoHttpError(RuntimeError):
 
 class OpenAlgoHttpClient:
     """
-    Thin async client for OpenAlgo's local REST API.
+    Thin Python compatibility wrapper around the Rust OpenAlgo SDK client.
     """
 
     def __init__(
@@ -37,43 +37,36 @@ class OpenAlgoHttpClient:
         api_key: str | None = None,
         base_url: str = "http://127.0.0.1:5000",
         api_version: str = "v1",
+        ws_url: str = "ws://127.0.0.1:8765",
         timeout_secs: int = 10,
         proxy_url: str | None = None,
-        session: aiohttp.ClientSession | None = None,
     ) -> None:
-        self._api_key = api_key or os.getenv("OPENALGO_API_KEY")
-        if not self._api_key:
-            raise ValueError("OpenAlgo API key not provided; set api_key or OPENALGO_API_KEY")
-
-        self._base_url = base_url.rstrip("/")
-        self._api_version = api_version.strip("/")
-        self._timeout = aiohttp.ClientTimeout(total=timeout_secs)
-        self._proxy_url = proxy_url
-        self._session = session
-        self._owns_session = session is None
+        self._client = RustOpenAlgoHttpClient(
+            api_key,
+            base_url,
+            api_version,
+            ws_url,
+            timeout_secs,
+            proxy_url,
+        )
 
     async def connect(self) -> None:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self._timeout)
+        await self._client.connect()
 
     async def close(self) -> None:
-        if self._owns_session and self._session is not None and not self._session.closed:
-            await self._session.close()
-
-    async def ping(self) -> dict[str, Any]:
-        return await self._post("ping")
+        await self._client.close()
 
     async def funds(self) -> dict[str, Any]:
-        return await self._post("funds")
+        return self._decode(await self._client.funds())
 
     async def orderbook(self) -> dict[str, Any]:
-        return await self._post("orderbook")
+        return self._decode(await self._client.orderbook())
 
     async def tradebook(self) -> dict[str, Any]:
-        return await self._post("tradebook")
+        return self._decode(await self._client.tradebook())
 
     async def positionbook(self) -> dict[str, Any]:
-        return await self._post("positionbook")
+        return self._decode(await self._client.positionbook())
 
     async def place_order(
         self,
@@ -89,20 +82,19 @@ class OpenAlgoHttpClient:
         trigger_price: str = "0",
         disclosed_quantity: str = "0",
     ) -> dict[str, Any]:
-        return await self._post(
-            "placeorder",
-            {
-                "strategy": strategy,
-                "symbol": symbol,
-                "action": action,
-                "exchange": exchange,
-                "pricetype": pricetype,
-                "product": product,
-                "quantity": quantity,
-                "price": price,
-                "trigger_price": trigger_price,
-                "disclosed_quantity": disclosed_quantity,
-            },
+        del disclosed_quantity  # OpenAlgo Rust SDK v1.0.5 does not expose this optional field.
+        return self._decode(
+            await self._client.place_order(
+                strategy,
+                symbol,
+                action,
+                exchange,
+                pricetype,
+                product,
+                quantity,
+                price,
+                trigger_price,
+            ),
         )
 
     async def modify_order(
@@ -120,57 +112,34 @@ class OpenAlgoHttpClient:
         trigger_price: str = "0",
         disclosed_quantity: str = "0",
     ) -> dict[str, Any]:
-        return await self._post(
-            "modifyorder",
-            {
-                "strategy": strategy,
-                "orderid": orderid,
-                "symbol": symbol,
-                "action": action,
-                "exchange": exchange,
-                "pricetype": pricetype,
-                "product": product,
-                "quantity": quantity,
-                "price": price,
-                "trigger_price": trigger_price,
-                "disclosed_quantity": disclosed_quantity,
-            },
+        del trigger_price, disclosed_quantity
+        return self._decode(
+            await self._client.modify_order(
+                orderid,
+                strategy,
+                symbol,
+                action,
+                exchange,
+                pricetype,
+                product,
+                quantity,
+                price,
+            ),
         )
 
     async def cancel_order(self, *, strategy: str, orderid: str) -> dict[str, Any]:
-        return await self._post("cancelorder", {"strategy": strategy, "orderid": orderid})
+        return self._decode(await self._client.cancel_order(orderid, strategy))
 
     async def cancel_all_order(self, *, strategy: str) -> dict[str, Any]:
-        return await self._post("cancelallorder", {"strategy": strategy})
+        return self._decode(await self._client.cancel_all_order(strategy))
 
     async def order_status(self, *, strategy: str, orderid: str) -> dict[str, Any]:
-        return await self._post("orderstatus", {"strategy": strategy, "orderid": orderid})
+        return self._decode(await self._client.order_status(orderid, strategy))
 
-    async def _post(
-        self,
-        endpoint: str,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        await self.connect()
-        assert self._session is not None
-
-        url = f"{self._base_url}/api/{self._api_version}/{endpoint}"
-        body = {"apikey": self._api_key}
-        if payload:
-            body.update(payload)
-
-        async with self._session.post(url, json=body, proxy=self._proxy_url) as resp:
-            try:
-                data = await resp.json(content_type=None)
-            except Exception as e:
-                text = await resp.text()
-                raise OpenAlgoHttpError(
-                    f"OpenAlgo {endpoint} returned non-JSON HTTP {resp.status}: {text}",
-                ) from e
-
+    def _decode(self, raw: str) -> dict[str, Any]:
+        data = json.loads(raw)
         status = str(data.get("status", "")).lower()
-        if resp.status >= 400 or status in {"error", "failure", "failed"}:
+        if status in {"error", "failure", "failed"}:
             message = data.get("message") or data.get("error") or data
-            raise OpenAlgoHttpError(f"OpenAlgo {endpoint} failed: {message}")
-
+            raise OpenAlgoHttpError(f"OpenAlgo request failed: {message}")
         return data

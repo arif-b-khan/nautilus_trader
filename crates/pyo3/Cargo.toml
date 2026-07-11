@@ -66,6 +66,7 @@ extension-module = [
   "nautilus-portfolio/extension-module",
   "nautilus-polymarket/extension-module",
   "nautilus-sandbox/extension-module",
+  "nautilus-openalgo/extension-module",
   "nautilus-persistence/extension-module",
   "nautilus-risk/extension-module",
   "nautilus-serialization/extension-module",
@@ -98,6 +99,7 @@ high-precision = [
   "nautilus-okx/high-precision",
   "nautilus-polymarket/high-precision",
   "nautilus-sandbox/high-precision",
+  "nautilus-openalgo/high-precision",
   "nautilus-tardis/high-precision",
 ]
 hypersync = ["defi", "nautilus-blockchain/hypersync"]
@@ -158,6 +160,7 @@ nautilus-lighter = { workspace = true, features = ["python"] }
 nautilus-okx = { workspace = true, features = ["python"] }
 nautilus-polymarket = { workspace = true, features = ["python"] }
 nautilus-sandbox = { workspace = true, features = ["python"] }
+nautilus-openalgo = { workspace = true, features = ["python"] }
 nautilus-tardis = { workspace = true, features = ["python", "replay"] }
 
 # local_dynamic_tls avoids exhausting static TLS space when the extension is dlopen'd
