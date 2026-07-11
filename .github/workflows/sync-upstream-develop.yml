@@ -20,13 +20,26 @@ jobs:
       UPSTREAM_REPOSITORY: nautechsystems/nautilus_trader
       DEVELOP_BRANCH: develop
       MAIN_BRANCH: main
+      TARGET_REPOSITORY: ${{ github.repository }}
+      SYNC_TOKEN: ${{ secrets.PAT_TOKEN }}
     steps:
+      - name: Verify PAT_TOKEN is configured
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          if [ -z "${PAT_TOKEN}" ]; then
+            echo "::error::PAT_TOKEN is not configured."
+            echo "Add a PAT with Contents, Pull requests, and Workflows write permissions."
+            exit 1
+          fi
+
       - name: Checkout repository
         # https://github.com/actions/checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: true
+          token: ${{ env.SYNC_TOKEN }}
 
       - name: Configure Git user
         run: |
@@ -58,11 +71,12 @@ jobs:
 
       - name: Create or reuse PR from develop to main
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ env.SYNC_TOKEN }}
         run: |
           set -euo pipefail
 
           existing_pr="$(gh pr list \
+            --repo "${TARGET_REPOSITORY}" \
             --base "${MAIN_BRANCH}" \
             --head "${DEVELOP_BRANCH}" \
             --state open \
@@ -71,6 +85,7 @@ jobs:
 
           if [ -z "${existing_pr}" ]; then
             gh pr create \
+              --repo "${TARGET_REPOSITORY}" \
               --base "${MAIN_BRANCH}" \
               --head "${DEVELOP_BRANCH}" \
               --title "Sync ${DEVELOP_BRANCH} into ${MAIN_BRANCH}" \
