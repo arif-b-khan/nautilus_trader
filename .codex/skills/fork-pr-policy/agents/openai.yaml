@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fork PR Policy"
+  short_description: "Keep branches and PRs anchored to the fork"
+  default_prompt: "Use $fork-pr-policy to prepare this branch and pull request safely."
