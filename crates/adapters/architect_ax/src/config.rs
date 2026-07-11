@@ -25,13 +25,13 @@ use crate::common::{credential::credential_env_vars, enums::AxEnvironment};
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(
-        module = "nautilus_trader.core.nautilus_pyo3.architect",
+        module = "nautilus_trader.core.nautilus_pyo3.architect_ax",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.architect_ax")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.architect_ax")
 )]
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[serde(default, deny_unknown_fields)]
@@ -75,7 +75,9 @@ pub struct AxDataClientConfig {
     /// Funding rate poll interval in minutes.
     #[builder(default = 15)]
     pub funding_rate_poll_interval_mins: u64,
-    /// WebSocket transport backend (defaults to `Tungstenite`).
+    /// WebSocket transport backend.
+    ///
+    /// Defaults to `Sockudo` when `transport-sockudo` is enabled, otherwise `Tungstenite`.
     #[builder(default)]
     pub transport_backend: TransportBackend,
 }
@@ -131,13 +133,13 @@ impl AxDataClientConfig {
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(
-        module = "nautilus_trader.core.nautilus_pyo3.architect",
+        module = "nautilus_trader.core.nautilus_pyo3.architect_ax",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.architect_ax")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.architect_ax")
 )]
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[serde(default, deny_unknown_fields)]
@@ -184,7 +186,9 @@ pub struct AxExecClientConfig {
     /// Cancel all open orders when the orders WebSocket disconnects.
     #[builder(default)]
     pub cancel_on_disconnect: bool,
-    /// WebSocket transport backend (defaults to `Tungstenite`).
+    /// WebSocket transport backend.
+    ///
+    /// Defaults to `Sockudo` when `transport-sockudo` is enabled, otherwise `Tungstenite`.
     #[builder(default)]
     pub transport_backend: TransportBackend,
 }

@@ -41,6 +41,7 @@
 //! - `hypersync`: Enables hypersync support (fast parallel hash maps) where available.
 //! - `tracing-bridge`: Enables the `tracing` subscriber bridge for log integration.
 //! - `defi`: Enables DeFi (Decentralized Finance) support including blockchain adapters.
+//! - `mimalloc`: Sets [mimalloc](https://github.com/microsoft/mimalloc) as Rust's global allocator (enabled for binary wheels).
 
 #![warn(rustc::all)]
 #![deny(unsafe_code)]
@@ -53,8 +54,14 @@
 
 use std::{path::Path, time::Duration};
 
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
 use nautilus_common::live::runtime::shutdown_runtime;
 use pyo3::{prelude::*, pyfunction};
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 const RUNTIME_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 
@@ -215,12 +222,22 @@ fn _libnautilus(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Adapters
     ////////////////////////////////////////////////////////////////////////////////
 
-    let n = "architect";
-    let submodule = pyo3::wrap_pymodule!(nautilus_architect_ax::python::architect);
+    let n = "architect_ax";
+    let submodule = pyo3::wrap_pymodule!(nautilus_architect_ax::python::architect_ax);
     m.add_wrapped(submodule)?;
     sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
     #[cfg(feature = "cython-compat")]
     re_export_module_attributes(m, n)?;
+
+    #[cfg(feature = "betfair")]
+    {
+        let n = "betfair";
+        let submodule = pyo3::wrap_pymodule!(nautilus_betfair::python::betfair);
+        m.add_wrapped(submodule)?;
+        sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
+        #[cfg(feature = "cython-compat")]
+        re_export_module_attributes(m, n)?;
+    }
 
     let n = "binance";
     let submodule = pyo3::wrap_pymodule!(nautilus_binance::python::binance);
@@ -287,6 +304,13 @@ fn _libnautilus(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let n = "kraken";
     let submodule = pyo3::wrap_pymodule!(nautilus_kraken::python::kraken);
+    m.add_wrapped(submodule)?;
+    sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
+    #[cfg(feature = "cython-compat")]
+    re_export_module_attributes(m, n)?;
+
+    let n = "lighter";
+    let submodule = pyo3::wrap_pymodule!(nautilus_lighter::python::lighter);
     m.add_wrapped(submodule)?;
     sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
     #[cfg(feature = "cython-compat")]

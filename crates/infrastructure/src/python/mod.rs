@@ -29,15 +29,42 @@ use pyo3::{prelude::*, pymodule};
 ///
 /// Returns a `PyErr` if the module initialization fails, e.g., when adding classes to the module.
 #[pymodule]
-#[allow(unused_variables)]
 pub fn infrastructure(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(not(any(feature = "redis", feature = "postgres")))]
+    let _ = m;
+
+    #[cfg(feature = "redis")]
+    m.add_class::<crate::redis::cache::RedisCacheConfig>()?;
     #[cfg(feature = "redis")]
     m.add_class::<crate::redis::cache::RedisCacheDatabase>()?;
     #[cfg(feature = "redis")]
-    m.add_class::<crate::redis::msgbus::RedisMessageBusDatabase>()?;
+    m.add_class::<redis::msgbus::PyRedisMessageBusBacking>()?;
+    #[cfg(feature = "redis")]
+    m.add_class::<crate::redis::msgbus::RedisMessageBusConfig>()?;
+    #[cfg(feature = "postgres")]
+    m.add_class::<crate::sql::cache::PostgresCacheConfig>()?;
     #[cfg(feature = "postgres")]
     m.add_class::<crate::sql::cache::PostgresCacheDatabase>()?;
     #[cfg(feature = "postgres")]
     m.add_class::<crate::sql::pg::PostgresConnectOptions>()?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "redis"))]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_infrastructure_module_exports_redis_message_bus_backing() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "infrastructure").unwrap();
+
+            infrastructure(py, &module).unwrap();
+
+            assert!(module.getattr("RedisMessageBusBacking").is_ok());
+        });
+    }
 }

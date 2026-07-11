@@ -97,7 +97,8 @@ fn create_btc_perpetual() -> InstrumentAny {
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
-        None,
+        None, // tick_scheme
+        None, // info
         UnixNanos::default(),
         UnixNanos::default(),
     ))
@@ -575,7 +576,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                 }
             }
             // Inner if consumes `data`, cannot hoist into a match guard
-            #[expect(clippy::collapsible_match)]
+            #[allow(clippy::collapsible_match)]
             Message::Ping(data) => {
                 if socket.send(Message::Pong(data)).await.is_err() {
                     break;

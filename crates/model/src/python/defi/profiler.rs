@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{U160, U256};
 use nautilus_core::python::to_pyvalue_err;
-use pyo3::prelude::*;
+use pyo3::{prelude::*, types::PyModule};
 
 use crate::{
     defi::{
@@ -58,8 +58,12 @@ impl PoolProfiler {
 
     #[getter]
     #[pyo3(name = "price_sqrt_ratio_x96")]
-    fn py_price_sqrt_ratio_x96(&self) -> String {
-        self.state.price_sqrt_ratio_x96.to_string()
+    #[gen_stub(override_return_type(type_repr = "int"))]
+    fn py_price_sqrt_ratio_x96(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyModule::import(py, "builtins")?
+            .getattr("int")?
+            .call1((self.state.price_sqrt_ratio_x96.to_string(),))?
+            .unbind())
     }
 
     #[getter]
@@ -102,6 +106,18 @@ impl PoolProfiler {
     #[pyo3(name = "fee_protocol")]
     fn py_fee_protocol(&self) -> u8 {
         self.state.fee_protocol
+    }
+
+    #[getter]
+    #[pyo3(name = "fee_protocol0_basis_points")]
+    fn py_fee_protocol0_basis_points(&self) -> Option<u32> {
+        self.state.fee_protocol0_basis_points
+    }
+
+    #[getter]
+    #[pyo3(name = "fee_protocol1_basis_points")]
+    fn py_fee_protocol1_basis_points(&self) -> Option<u32> {
+        self.state.fee_protocol1_basis_points
     }
 
     /// Returns the pool's active liquidity tracked by the tick map.
@@ -190,6 +206,9 @@ impl PoolProfiler {
     }
 
     /// Simulates an exact input swap (know input amount, calculate output amount).
+    ///
+    /// # Errors
+    /// Returns error if pool is not initialized, input is zero, or price limit is invalid
     #[pyo3(name = "swap_exact_in")]
     fn py_swap_exact_in(
         &self,
@@ -208,6 +227,10 @@ impl PoolProfiler {
     }
 
     /// Simulates an exact output swap (know output amount, calculate required input amount).
+    ///
+    /// # Errors
+    /// Returns error if pool is not initialized, output is zero, price limit is invalid,
+    /// or insufficient liquidity exists to fulfill the exact output amount
     #[pyo3(name = "swap_exact_out")]
     fn py_swap_exact_out(
         &self,
@@ -253,6 +276,12 @@ impl PoolProfiler {
     ///
     /// # Returns
     /// Detailed result with size and search diagnostics
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Impact is zero or exceeds 100% (10000 bps)
+    /// - Pool is not initialized
+    /// - Swap simulations fail
     #[pyo3(name = "size_for_impact_bps_detailed")]
     fn py_size_for_impact_bps_detailed(
         &self,
@@ -261,5 +290,83 @@ impl PoolProfiler {
     ) -> PyResult<SizeForImpactResult> {
         self.size_for_impact_bps_detailed(impact_bps, zero_for_one)
             .map_err(to_pyvalue_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{str::FromStr, sync::Arc};
+
+    use alloy_primitives::{U160, address};
+    use nautilus_core::UnixNanos;
+    use pyo3::{
+        Python,
+        types::{PyAnyMethods, PyInt},
+    };
+    use rstest::rstest;
+
+    use crate::defi::{
+        AmmType, Blockchain, Chain, Dex, DexType, Pool, PoolIdentifier, Token,
+        pool_analysis::PoolProfiler,
+    };
+
+    #[rstest]
+    fn price_sqrt_ratio_x96_returns_python_int() {
+        let sqrt_price_x96 = U160::from_str("79228162514264337593543950336").unwrap();
+        let mut profiler = PoolProfiler::new(pool());
+        profiler.initialize(sqrt_price_x96).unwrap();
+        Python::initialize();
+
+        Python::attach(|py| {
+            let value = profiler.py_price_sqrt_ratio_x96(py).unwrap();
+            let value = value.bind(py);
+
+            assert!(value.is_instance_of::<PyInt>());
+            assert_eq!(value.str().unwrap().to_string(), sqrt_price_x96.to_string());
+        });
+    }
+
+    fn pool() -> Arc<Pool> {
+        let chain = Arc::new(Chain::new(Blockchain::Ethereum, 1));
+        let dex = Arc::new(Dex::new(
+            (*chain).clone(),
+            DexType::UniswapV3,
+            "0x0000000000000000000000000000000000000fac",
+            1,
+            AmmType::CLAMM,
+            "PoolCreated",
+            "Swap",
+            "Mint",
+            "Burn",
+            "Collect",
+        ));
+        let token0 = Token::new(
+            chain.clone(),
+            address!("0000000000000000000000000000000000000001"),
+            "USD Coin".to_string(),
+            "USDC".to_string(),
+            6,
+        );
+        let token1 = Token::new(
+            chain.clone(),
+            address!("0000000000000000000000000000000000000002"),
+            "Wrapped Ether".to_string(),
+            "WETH".to_string(),
+            18,
+        );
+        let pool_address = address!("0000000000000000000000000000000000000003");
+
+        Arc::new(Pool::new(
+            chain,
+            dex,
+            pool_address,
+            PoolIdentifier::from_address(pool_address),
+            1,
+            token0,
+            token1,
+            Some(500),
+            Some(10),
+            UnixNanos::default(),
+        ))
     }
 }

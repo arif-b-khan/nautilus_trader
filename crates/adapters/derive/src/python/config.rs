@@ -15,6 +15,7 @@
 
 //! Python bindings for Derive configuration.
 
+use nautilus_network::websocket::TransportBackend;
 use pyo3::pymethods;
 use rust_decimal::Decimal;
 
@@ -39,6 +40,7 @@ impl DeriveDataClientConfig {
         currencies = None,
         include_expired = None,
         auto_load_missing_instruments = None,
+        transport_backend = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
@@ -52,6 +54,7 @@ impl DeriveDataClientConfig {
         currencies: Option<Vec<String>>,
         include_expired: Option<bool>,
         auto_load_missing_instruments: Option<bool>,
+        transport_backend: Option<TransportBackend>,
     ) -> Self {
         let defaults = Self::default();
         Self {
@@ -67,7 +70,7 @@ impl DeriveDataClientConfig {
             include_expired: include_expired.unwrap_or(defaults.include_expired),
             auto_load_missing_instruments: auto_load_missing_instruments
                 .unwrap_or(defaults.auto_load_missing_instruments),
-            transport_backend: defaults.transport_backend,
+            transport_backend: transport_backend.unwrap_or(defaults.transport_backend),
         }
     }
 
@@ -104,6 +107,8 @@ impl DeriveExecClientConfig {
         trade_module_address = None,
         signature_expiry_secs = None,
         market_order_slippage_bps = None,
+        max_matching_requests_per_second = None,
+        transport_backend = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
@@ -124,6 +129,8 @@ impl DeriveExecClientConfig {
         trade_module_address: Option<String>,
         signature_expiry_secs: Option<u64>,
         market_order_slippage_bps: Option<u32>,
+        max_matching_requests_per_second: Option<u32>,
+        transport_backend: Option<TransportBackend>,
     ) -> Self {
         let defaults = Self::default();
         Self {
@@ -140,13 +147,14 @@ impl DeriveExecClientConfig {
                 .unwrap_or(defaults.retry_delay_initial_ms),
             retry_delay_max_ms: retry_delay_max_ms.unwrap_or(defaults.retry_delay_max_ms),
             max_fee_per_contract,
-            transport_backend: defaults.transport_backend,
+            transport_backend: transport_backend.unwrap_or(defaults.transport_backend),
             domain_separator,
             action_typehash,
             trade_module_address,
             signature_expiry_secs: signature_expiry_secs.unwrap_or(defaults.signature_expiry_secs),
             market_order_slippage_bps: market_order_slippage_bps
                 .unwrap_or(defaults.market_order_slippage_bps),
+            max_matching_requests_per_second,
         }
     }
 

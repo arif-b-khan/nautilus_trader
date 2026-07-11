@@ -30,6 +30,7 @@ use crate::{
         parse_level_filter_str,
         writer::FileWriterConfig,
     },
+    python::config_error_to_pyvalue_err,
 };
 
 #[pymethods]
@@ -50,7 +51,10 @@ impl LoggerConfig {
         fileout_sync_on_flush=None,
         buffered_stdout=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PyO3 constructor mirrors LoggerConfig keyword arguments"
+    )]
     fn py_new(
         stdout_level: Option<LogLevel>,
         fileout_level: Option<LogLevel>,
@@ -80,6 +84,7 @@ impl LoggerConfig {
         );
         config.fileout_sync_on_flush = fileout_sync_on_flush.unwrap_or(true);
         config.buffered_stdout = buffered_stdout.unwrap_or(false);
+        config.validate().map_err(config_error_to_pyvalue_err)?;
         Ok(config)
     }
 
@@ -128,6 +133,10 @@ impl FileWriterConfig {
 ///
 /// Should only be called once during an applications run, ideally at the
 /// beginning of the run.
+///
+/// # Errors
+///
+/// Returns an error if the logging subsystem fails to initialize.
 #[pyfunction]
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "init_logging")]
@@ -155,6 +164,9 @@ pub fn py_init_logging(
     let component_levels = parse_component_levels(component_levels).map_err(to_pyvalue_err)?;
 
     let file_config = FileWriterConfig::new(directory, file_name, file_format, file_rotate);
+    file_config
+        .validate()
+        .map_err(config_error_to_pyvalue_err)?;
 
     let mut config = LoggerConfig::new(
         map_log_level_to_filter(level_stdout),
@@ -350,30 +362,35 @@ impl PyLogger {
 
     /// Emit a TRACE level record.
     #[pyo3(name = "trace")]
+    #[pyo3(signature = (message, color=None))]
     fn py_trace(&self, message: &str, color: Option<LogColor>) {
         self.log_message(LogLevel::Trace, color, message);
     }
 
     /// Emit a DEBUG level record.
     #[pyo3(name = "debug")]
+    #[pyo3(signature = (message, color=None))]
     fn py_debug(&self, message: &str, color: Option<LogColor>) {
         self.log_message(LogLevel::Debug, color, message);
     }
 
     /// Emit an INFO level record.
     #[pyo3(name = "info")]
+    #[pyo3(signature = (message, color=None))]
     fn py_info(&self, message: &str, color: Option<LogColor>) {
         self.log_message(LogLevel::Info, color, message);
     }
 
     /// Emit a WARNING level record.
     #[pyo3(name = "warning")]
+    #[pyo3(signature = (message, color=None))]
     fn py_warning(&self, message: &str, color: Option<LogColor>) {
         self.log_message(LogLevel::Warning, color, message);
     }
 
     /// Emit an ERROR level record.
     #[pyo3(name = "error")]
+    #[pyo3(signature = (message, color=None))]
     fn py_error(&self, message: &str, color: Option<LogColor>) {
         self.log_message(LogLevel::Error, color, message);
     }
@@ -406,6 +423,7 @@ impl PyLogger {
 
     /// Emit a log record at the given level (Python-facing helper).
     #[pyo3(name = "_log")]
+    #[pyo3(signature = (level, color=None, message=""))]
     fn py_log(&self, level: LogLevel, color: Option<LogColor>, message: &str) {
         self.log_message(level, color, message);
     }

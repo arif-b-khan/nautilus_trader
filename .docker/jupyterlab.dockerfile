@@ -1,5 +1,6 @@
-ARG GIT_TAG=develop
-FROM ghcr.io/nautechsystems/nautilus_trader:$GIT_TAG
+ARG BASE_IMAGE_REPOSITORY=ghcr.io/nautechsystems/nautilus_trader:latest
+ARG BASE_IMAGE_DIGEST=ffaf4104402164d483371ecb27e21b16231293c416adb9771f9bd97a04f27673
+FROM ${BASE_IMAGE_REPOSITORY}@sha256:${BASE_IMAGE_DIGEST}
 
 COPY docs/tutorials /opt/pysetup/tutorials
 
@@ -28,9 +29,8 @@ RUN curl -fsSL --retry 3 \
     mv /tmp/eurusd_instrument.parquet /catalog/data/currency_pair/EURUSD.SIM/part-0.parquet
 
 # Install UV
-COPY scripts/uv-version.sh scripts/
-COPY pyproject.toml ./
-RUN UV_VERSION=$(bash scripts/uv-version.sh) && curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | sh
+COPY --from=ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 \
+  /uv /uvx /root/.local/bin/
 
 RUN uv pip install --system jupyterlab datafusion
 

@@ -4,12 +4,14 @@ import typing
 
 from nautilus_trader import infrastructure
 from nautilus_trader import model
+from nautilus_trader import network
 
 __all__ = [
     "BlockchainDataClientConfig",
     "BlockchainDataClientFactory",
     "BlockchainExecutionClientFactory",
     "DexPoolFilters",
+    "load_pool_snapshot",
 ]
 
 @typing.final
@@ -27,6 +29,7 @@ class BlockchainDataClientConfig:
         pool_filters: DexPoolFilters | None = None,
         postgres_cache_database_config: infrastructure.PostgresConnectOptions | None = None,
         proxy_url: str | None = None,
+        transport_backend: network.TransportBackend | None = None,
     ) -> None: ...
     @property
     def chain(self) -> model.Chain: ...
@@ -44,7 +47,10 @@ class BlockchainDataClientConfig:
     def proxy_url(self) -> str | None: ...
 
 @typing.final
-class BlockchainDataClientFactory: ...
+class BlockchainDataClientFactory:
+    def __init__(self) -> None: ...
+    def name(self) -> str: ...
+    def config_type(self) -> str: ...
 
 @typing.final
 class BlockchainExecutionClientFactory: ...
@@ -52,3 +58,11 @@ class BlockchainExecutionClientFactory: ...
 @typing.final
 class DexPoolFilters:
     def __init__(self, remove_pools_with_empty_erc20_fields: bool | None = ...) -> None: ...
+
+def load_pool_snapshot(
+    pg_config: infrastructure.PostgresConnectOptions,
+    chain_id: int,
+    pool_address: str,
+    before_block: int | None = None,
+    require_valid: bool = True,
+) -> model.PoolSnapshot | None: ...

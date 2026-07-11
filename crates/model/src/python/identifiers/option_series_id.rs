@@ -19,11 +19,14 @@ use std::{
     str::FromStr,
 };
 
-use nautilus_core::{UnixNanos, python::to_pyvalue_err};
+use nautilus_core::UnixNanos;
 use pyo3::{prelude::*, pyclass::CompareOp};
 use ustr::Ustr;
 
-use crate::identifiers::{OptionSeriesId, Venue};
+use crate::{
+    identifiers::{OptionSeriesId, Venue},
+    python::option_series_id_error_to_pyvalue_err,
+};
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
@@ -48,6 +51,10 @@ impl OptionSeriesId {
     ///
     /// The `date_str` is parsed via `UnixNanos::FromStr`, which accepts `"YYYY-MM-DD"`,
     /// RFC 3339 timestamps, integer nanoseconds, or floating-point seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `venue` or `date_str` is invalid.
     #[staticmethod]
     #[pyo3(name = "from_expiry")]
     fn py_from_expiry(
@@ -56,13 +63,14 @@ impl OptionSeriesId {
         settlement_currency: &str,
         date_str: &str,
     ) -> PyResult<Self> {
-        Self::from_expiry(venue, underlying, settlement_currency, date_str).map_err(to_pyvalue_err)
+        Self::from_expiry(venue, underlying, settlement_currency, date_str)
+            .map_err(option_series_id_error_to_pyvalue_err)
     }
 
     #[staticmethod]
     #[pyo3(name = "from_str")]
     fn py_from_str(value: &str) -> PyResult<Self> {
-        Self::from_str(value).map_err(to_pyvalue_err)
+        Self::from_str(value).map_err(option_series_id_error_to_pyvalue_err)
     }
 
     #[getter]

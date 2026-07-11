@@ -11,7 +11,6 @@ keywords.workspace = true
 documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
-publish = false # Do not publish to crates.io yet
 
 [lints]
 workspace = true
@@ -48,7 +47,8 @@ python = [
 high-precision = ["nautilus-model/high-precision"]
 
 [package.metadata.docs.rs]
-all-features = true
+# Python docs depend on the local pyo3-stub-gen patch for now, which published crates do not carry
+features = ["examples", "high-precision"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -91,8 +91,25 @@ nautilus-trading = { workspace = true }
 
 axum = { workspace = true }
 bytes = { workspace = true }
+criterion = { workspace = true }
 dotenvy = { workspace = true }
 rstest = { workspace = true }
+
+[[bench]]
+name = "signing"
+harness = false
+
+[[bench]]
+name = "data"
+harness = false
+
+[[bench]]
+name = "exec"
+harness = false
+
+[[bench]]
+name = "micros"
+harness = false
 
 # Run with `cargo run --bin derive-flatten -p nautilus-derive`.
 [[bin]]
@@ -129,3 +146,8 @@ name = "derive-delta-neutral"
 path = "examples/node_delta_neutral.rs"
 required-features = ["examples"]
 doc = false
+
+[[test]]
+name = "python"
+path = "tests/python.rs"
+required-features = ["python"]

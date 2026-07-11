@@ -189,6 +189,7 @@ pub fn parse_spot_instrument(
         None, // margin_maint
         None, // maker_fee (loaded separately via transaction_summary)
         None, // taker_fee
+        None, // tick_scheme
         None, // info
         ts_init,
         ts_init,
@@ -243,6 +244,7 @@ pub fn parse_perpetual_instrument(
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
+        None, // tick_scheme
         None, // info
         ts_init,
         ts_init,
@@ -315,6 +317,7 @@ pub fn parse_future_instrument(
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
+        None, // tick_scheme
         None, // info
         ts_init,
         ts_init,
@@ -1310,14 +1313,14 @@ mod tests {
         assert!(
             matches!(&instruments[0], InstrumentAny::CryptoPerpetual(_)),
             "Expected CryptoPerpetual for BTC PERP, was{:?}",
-            &instruments[0]
+            instruments[0]
         );
 
         // Second product is "BTC 24 APR 26" -> CryptoFuture
         assert!(
             matches!(&instruments[1], InstrumentAny::CryptoFuture(_)),
             "Expected CryptoFuture for dated future, was{:?}",
-            &instruments[1]
+            instruments[1]
         );
     }
 

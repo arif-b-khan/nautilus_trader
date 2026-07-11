@@ -109,7 +109,7 @@ fn build_stream_config(
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.betfair")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.betfair")
 )]
 pub struct BetfairDataConfig {
     /// Account currency code.
@@ -172,6 +172,9 @@ pub struct BetfairDataConfig {
     /// Subscribe to the race stream for Total Performance Data (TPD).
     #[builder(default)]
     pub subscribe_race_data: bool,
+    /// Subscribe to the sports data stream for cricket match updates.
+    #[builder(default)]
+    pub subscribe_cricket_data: bool,
 }
 
 impl Default for BetfairDataConfig {
@@ -275,7 +278,7 @@ impl BetfairDataConfig {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.betfair")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.betfair")
 )]
 pub struct BetfairExecConfig {
     /// Trader ID for the client core.
@@ -433,6 +436,7 @@ mod tests {
         assert!(config.stream_conflate_ms.is_none());
         assert_eq!(config.subscription_delay_secs, 3);
         assert!(!config.subscribe_race_data);
+        assert!(!config.subscribe_cricket_data);
     }
 
     #[rstest]
@@ -659,6 +663,7 @@ stream_reconnect_delay_max_ms = 5000
 stream_use_tls = false
 subscription_delay_secs = 1
 subscribe_race_data = true
+subscribe_cricket_data = true
 "#,
         )
         .unwrap();
@@ -668,6 +673,7 @@ subscribe_race_data = true
         assert_eq!(config.stream_heartbeat_ms, 2_500);
         assert!(!config.stream_use_tls);
         assert!(config.subscribe_race_data);
+        assert!(config.subscribe_cricket_data);
     }
 
     #[rstest]

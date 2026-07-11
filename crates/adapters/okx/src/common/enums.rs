@@ -171,7 +171,7 @@ pub enum OKXOrderType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXOrderStatus {
     Canceled,
@@ -265,7 +265,7 @@ impl From<LiquiditySide> for OKXExecType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXInstrumentType {
     #[default]
@@ -442,7 +442,7 @@ pub enum OKXSpreadState {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXContractType {
     #[serde(rename = "")]
@@ -528,7 +528,7 @@ impl TryFrom<OKXOptionType> for OptionKind {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXGreeksType {
     /// Black-Scholes greeks in USD.
@@ -599,7 +599,7 @@ impl From<OKXGreeksType> for GreeksConvention {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXTradeMode {
     #[default]
@@ -675,7 +675,7 @@ pub enum OKXAccountMode {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXMarginMode {
     #[serde(rename = "")]
@@ -717,7 +717,7 @@ pub enum OKXMarginMode {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXPositionMode {
     #[default]
@@ -978,6 +978,8 @@ pub enum OKXBookChannel {
     BookL2Tbt,
     /// Low-latency 50-depth channel (`books50-l2-tbt`).
     Books50L2Tbt,
+    /// Spread 5-depth snapshot channel (`sprd-books5`).
+    SprdBooks5,
 }
 
 /// Represents OKX VIP level tiers for trading fee structure and API limits.
@@ -1019,7 +1021,7 @@ pub enum OKXBookChannel {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXVipLevel {
     /// VIP level 0 (default tier).
@@ -1486,7 +1488,7 @@ pub enum OKXQuickMarginType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXEnvironment {
     /// Live trading environment.
@@ -1494,4 +1496,50 @@ pub enum OKXEnvironment {
     Live,
     /// Demo trading environment.
     Demo,
+}
+
+/// OKX API region.
+///
+/// Selects the regional endpoint set. OKX serves region-specific hosts and an
+/// API key registered in one region is rejected by another region's endpoints
+/// (returning `API key doesn't exist`).
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Display,
+    PartialEq,
+    Eq,
+    Hash,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(ascii_case_insensitive, serialize_all = "lowercase")]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
+)]
+pub enum OKXRegion {
+    /// Global endpoints (accounts registered on www.okx.com).
+    #[default]
+    Global,
+    /// European Economic Area endpoints (accounts registered on my.okx.com).
+    Eea,
+    /// United States and Australia endpoints (accounts registered on app.okx.com).
+    Us,
 }

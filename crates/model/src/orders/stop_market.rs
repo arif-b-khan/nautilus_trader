@@ -121,6 +121,7 @@ impl StopMarketOrder {
             ts_init,
             ts_init,
             None,
+            None,
             Some(trigger_price),
             Some(trigger_type),
             None,
@@ -617,9 +618,6 @@ impl TryFrom<OrderInitialized> for StopMarketOrder {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//  Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

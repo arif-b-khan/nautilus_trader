@@ -25,7 +25,7 @@ use nautilus_core::serialization::deserialize_decimal;
 use nautilus_model::identifiers::InstrumentId;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 use ustr::Ustr;
 
 use crate::{
@@ -33,7 +33,8 @@ use crate::{
         enums::{
             DeriveInstrumentType, DeriveOrderbookDepth, DeriveOrderbookGroup, DeriveTickerInterval,
         },
-        parse::format_instrument_id,
+        parse::{format_instrument_id, salvage_elements},
+        rate_limit::{DERIVE_MATCHING_RATE_KEY, DERIVE_NON_MATCHING_RATE_KEY},
     },
     http::models::{
         DeriveAggregateTradingStats, DeriveOptionPricing, DeriveOrder, DerivePublicTrade,
@@ -371,7 +372,7 @@ pub struct WsUnsubscribeResult {
 ///
 /// The venue tags the frame with `method = "subscription"` and inlines the
 /// channel-specific payload under `params.data`.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WsSubscriptionFrame {
     /// Routing key (`method` on the wire). Always `"subscription"`.
     #[serde(default)]
@@ -381,12 +382,17 @@ pub struct WsSubscriptionFrame {
 }
 
 /// Channel-tagged notification payload nested under [`WsSubscriptionFrame::params`].
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+///
+/// The channel payload is held as a [`RawValue`] (the raw JSON bytes) rather
+/// than a decoded [`Value`]; each channel parser decodes those bytes straight
+/// into its typed struct, so the inbound path never materialises the payload
+/// into an intermediate `Value` tree.
+#[derive(Debug, Clone, Deserialize)]
 pub struct WsSubscriptionPayload {
     /// Channel that produced the update (e.g. `"ticker_slim.ETH-PERP.1000"`).
     pub channel: Ustr,
     /// Opaque per-channel payload; specific channels decode this further.
-    pub data: Value,
+    pub data: Box<RawValue>,
 }
 
 /// Price level in a Derive order book snapshot.
@@ -467,17 +473,9 @@ impl<'de> Deserialize<'de> for DeriveOrdersSubscriptionData {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
-        let orders = match value {
-            Value::Array(values) => values
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<DeriveOrder>(value).ok())
-                .collect(),
-            value => vec![
-                serde_json::from_value::<DeriveOrder>(value).map_err(serde::de::Error::custom)?,
-            ],
-        };
-        Ok(Self { orders })
+        Ok(Self {
+            orders: subscription_rows(deserializer)?,
+        })
     }
 }
 
@@ -493,17 +491,24 @@ impl<'de> Deserialize<'de> for DeriveTradesSubscriptionData {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
-        let trades = match value {
-            Value::Array(values) => values
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<DeriveTrade>(value).ok())
-                .collect(),
-            value => vec![
-                serde_json::from_value::<DeriveTrade>(value).map_err(serde::de::Error::custom)?,
-            ],
-        };
-        Ok(Self { trades })
+        Ok(Self {
+            trades: subscription_rows(deserializer)?,
+        })
+    }
+}
+
+/// Decodes a private subscription payload that arrives as either a single row
+/// object or an array of rows; array elements are salvaged per element.
+fn subscription_rows<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Array(values) => Ok(salvage_elements(values)),
+        value => Ok(vec![
+            serde_json::from_value::<T>(value).map_err(serde::de::Error::custom)?,
+        ]),
     }
 }
 
@@ -754,12 +759,26 @@ pub enum DeriveWsFrame {
     Unknown(Value),
 }
 
+/// Single-pass deserialize target for an inbound frame.
+///
+/// `params` is captured as a raw [`RawValue`] span rather than eagerly decoded:
+/// it is only parsed into a [`WsSubscriptionPayload`] once the method check
+/// confirms a subscription, so a non-subscription notification carrying an
+/// unrelated `params` object still classifies as `Unknown` instead of failing
+/// the frame parse. `result` stays a `Value` because the lower-frequency
+/// request/response path consumes it as one.
 #[derive(Debug, Deserialize)]
-struct WsResponseFrame {
+struct InboundFrame {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    method: Option<Ustr>,
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
     error: Option<JsonRpcError>,
+    #[serde(default)]
+    params: Option<Box<RawValue>>,
 }
 
 impl DeriveWsFrame {
@@ -772,26 +791,30 @@ impl DeriveWsFrame {
     ///
     /// Returns [`serde_json::Error`] when `text` is not valid JSON.
     pub fn parse(text: &str) -> serde_json::Result<Self> {
-        let value: Value = serde_json::from_str(text)?;
+        let frame: InboundFrame = serde_json::from_str(text)?;
 
-        if let Some(id) = value.get("id").and_then(Value::as_u64) {
-            let response: WsResponseFrame = serde_json::from_value(value)?;
+        if let Some(id) = frame.id {
             return Ok(Self::Response {
                 id,
-                result: response.result,
-                error: response.error,
+                result: frame.result,
+                error: frame.error,
             });
         }
 
-        if let Some(method) = value.get("method").and_then(Value::as_str)
-            && method == "subscription"
-            && value.get("params").is_some()
+        if frame
+            .method
+            .as_ref()
+            .is_some_and(|method| method.as_str() == "subscription")
+            && let Some(params) = frame.params
         {
-            let frame: WsSubscriptionFrame = serde_json::from_value(value)?;
-            return Ok(Self::Subscription(frame.params));
+            let payload: WsSubscriptionPayload = serde_json::from_str(params.get())?;
+            return Ok(Self::Subscription(payload));
         }
 
-        Ok(Self::Unknown(value))
+        // Unrecognised frame: re-parse into a `Value` for diagnostic logging.
+        // The live feed only sends responses and subscription notifications, so
+        // this second parse never runs on a hot path.
+        Ok(Self::Unknown(serde_json::from_str(text)?))
     }
 }
 
@@ -859,14 +882,50 @@ pub mod methods {
     pub const PUBLIC_UNSUBSCRIBE: &str = "unsubscribe";
     /// Submit a signed order. Params: [`crate::http::query::DeriveOrderParams`].
     pub const PRIVATE_ORDER: &str = "private/order";
+    /// Submit a signed trigger order. Params:
+    /// [`crate::http::query::DeriveTriggerOrderParams`].
+    pub const PRIVATE_TRIGGER_ORDER: &str = "private/trigger_order";
     /// Cancel a single order. Params: [`crate::http::query::DeriveCancelParams`].
     pub const PRIVATE_CANCEL: &str = "private/cancel";
+    /// Cancel a single trigger order. Params:
+    /// [`crate::http::query::DeriveCancelTriggerOrderParams`].
+    pub const PRIVATE_CANCEL_TRIGGER_ORDER: &str = "private/cancel_trigger_order";
+    /// List untriggered trigger orders. Params:
+    /// [`crate::http::query::DeriveGetTriggerOrdersParams`].
+    pub const PRIVATE_GET_TRIGGER_ORDERS: &str = "private/get_trigger_orders";
     /// Cancel every open order on the subaccount, optionally scoped to an
     /// instrument. Params: [`crate::http::query::DeriveCancelAllParams`].
     pub const PRIVATE_CANCEL_ALL: &str = "private/cancel_all";
     /// Atomically cancel one order and submit a replacement. Params:
     /// [`crate::http::query::DeriveReplaceParams`].
     pub const PRIVATE_REPLACE: &str = "private/replace";
+}
+
+/// Returns the rate-limit key for a JSON-RPC `method` sent over the WebSocket.
+///
+/// Matching-engine actions (order create/cancel/replace) draw on the venue's
+/// per-account matching allowance; everything else (login, subscribe, reads)
+/// draws on the non-matching allowance. See [`crate::common::rate_limit`].
+#[must_use]
+pub(crate) fn rate_limit_key_for(method: &str) -> Ustr {
+    let key = if is_matching_method(method) {
+        DERIVE_MATCHING_RATE_KEY
+    } else {
+        DERIVE_NON_MATCHING_RATE_KEY
+    };
+    Ustr::from(key)
+}
+
+fn is_matching_method(method: &str) -> bool {
+    matches!(
+        method,
+        methods::PRIVATE_ORDER
+            | methods::PRIVATE_TRIGGER_ORDER
+            | methods::PRIVATE_REPLACE
+            | methods::PRIVATE_CANCEL
+            | methods::PRIVATE_CANCEL_TRIGGER_ORDER
+            | methods::PRIVATE_CANCEL_ALL
+    )
 }
 
 #[cfg(test)]
@@ -895,6 +954,21 @@ mod tests {
             orderbook_channel("ETH-PERP", "1", "10"),
             "orderbook.ETH-PERP.1.10",
         );
+    }
+
+    #[rstest]
+    #[case(methods::PRIVATE_ORDER, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_TRIGGER_ORDER, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_REPLACE, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_CANCEL, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_CANCEL_TRIGGER_ORDER, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_CANCEL_ALL, DERIVE_MATCHING_RATE_KEY)]
+    #[case(methods::PUBLIC_LOGIN, DERIVE_NON_MATCHING_RATE_KEY)]
+    #[case(methods::PUBLIC_SUBSCRIBE, DERIVE_NON_MATCHING_RATE_KEY)]
+    #[case(methods::PUBLIC_UNSUBSCRIBE, DERIVE_NON_MATCHING_RATE_KEY)]
+    #[case(methods::PRIVATE_GET_TRIGGER_ORDERS, DERIVE_NON_MATCHING_RATE_KEY)]
+    fn test_rate_limit_key_for(#[case] method: &str, #[case] expected: &str) {
+        assert_eq!(rate_limit_key_for(method), Ustr::from(expected));
     }
 
     #[rstest]
@@ -1184,7 +1258,8 @@ mod tests {
         match frame {
             DeriveWsFrame::Subscription(payload) => {
                 assert_eq!(payload.channel.as_str(), "ticker.ETH-PERP.1000");
-                assert_eq!(payload.data["mark_price"], "3500.5");
+                let data: Value = serde_json::from_str(payload.data.get()).unwrap();
+                assert_eq!(data["mark_price"], "3500.5");
             }
             other => panic!("expected Subscription, was {other:?}"),
         }
@@ -1200,6 +1275,22 @@ mod tests {
                 assert!(v.get("id").is_none(), "unknown frame must not carry id");
                 let method = v.get("method").and_then(Value::as_str);
                 assert_ne!(method, Some("subscription"));
+            }
+            other => panic!("expected Unknown, was {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn test_parse_non_subscription_notification_with_params_is_unknown() {
+        // A non-subscription notification that carries an unrelated `params`
+        // object must classify as Unknown, not fail the frame parse: the
+        // params shape is only checked once the method confirms a subscription.
+        let text = json!({"method": "heartbeat", "params": {"interval": 30}}).to_string();
+        let frame = DeriveWsFrame::parse(&text).unwrap();
+        match frame {
+            DeriveWsFrame::Unknown(v) => {
+                assert_eq!(v["method"], "heartbeat");
+                assert_eq!(v["params"]["interval"], 30);
             }
             other => panic!("expected Unknown, was {other:?}"),
         }

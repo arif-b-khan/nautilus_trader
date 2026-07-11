@@ -91,7 +91,8 @@ def main() -> None:
     )
 
     node = builder.build()
-    node.add_native_strategy(
+    node.add_builtin_strategy(
+        "ExecTester",
         ExecTesterConfig(
             strategy_id=StrategyId.from_str("EXEC_TESTER-001"),
             instrument_id=instrument_id,

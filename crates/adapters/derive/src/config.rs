@@ -19,18 +19,20 @@ use std::fmt::Debug;
 
 use nautilus_network::websocket::TransportBackend;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 use crate::common::{enums::DeriveEnvironment, urls};
 
 /// Configuration for the Derive data client.
-#[derive(Clone, Debug, bon::Builder)]
+#[derive(Clone, Debug, Serialize, Deserialize, bon::Builder)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.derive", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.derive")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.derive")
 )]
 pub struct DeriveDataClientConfig {
     /// Override for the REST API base URL.
@@ -101,14 +103,15 @@ impl DeriveDataClientConfig {
 /// `Debug` is implemented manually so that `session_key` is redacted; the
 /// derived `Debug` would leak the raw secret through any logger or Python
 /// `__repr__`.
-#[derive(Clone, bon::Builder)]
+#[derive(Clone, Serialize, Deserialize, bon::Builder)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.derive", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.derive")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.derive")
 )]
 pub struct DeriveExecClientConfig {
     /// Derive Chain smart-contract wallet address (`X-LYRAWALLET`). Falls back
@@ -158,9 +161,9 @@ pub struct DeriveExecClientConfig {
     /// Override for the Trade module contract address. Falls back to the
     /// shipped per-environment constant when unset.
     pub trade_module_address: Option<String>,
-    /// Signature expiry TTL in seconds (added to the wall clock when signing
-    /// each action). Must be at least the venue minimum
-    /// ([`crate::common::consts::MIN_SIGNATURE_TTL`], 300s).
+    /// Signature expiry TTL in seconds for normal orders and replaces (added
+    /// to the wall clock before signing). Must be greater than the venue
+    /// minimum ([`crate::common::consts::MIN_SIGNATURE_TTL`], 300s).
     #[builder(default = 600)]
     pub signature_expiry_secs: u64,
     /// Slippage bound applied to market orders when deriving a worst-acceptable
@@ -168,6 +171,11 @@ pub struct DeriveExecClientConfig {
     /// (1 bp = 0.01%). Defaults to 50 bp = 0.5%.
     #[builder(default = 50)]
     pub market_order_slippage_bps: u32,
+    /// Maximum matching-engine requests per second for order writes sent over
+    /// the WebSocket (create/cancel/replace). Defaults to the Trader-tier limit
+    /// of 1 when unset; raise it for Market Maker accounts with higher
+    /// negotiated limits. See <https://docs.derive.xyz/reference/rate-limits>.
+    pub max_matching_requests_per_second: Option<u32>,
 }
 
 impl Default for DeriveExecClientConfig {
@@ -200,6 +208,10 @@ impl Debug for DeriveExecClientConfig {
             .field("trade_module_address", &self.trade_module_address)
             .field("signature_expiry_secs", &self.signature_expiry_secs)
             .field("market_order_slippage_bps", &self.market_order_slippage_bps)
+            .field(
+                "max_matching_requests_per_second",
+                &self.max_matching_requests_per_second,
+            )
             .finish()
     }
 }
@@ -285,6 +297,7 @@ mod tests {
         assert_eq!(config.environment, DeriveEnvironment::Mainnet);
         assert_eq!(config.http_timeout_secs, 10);
         assert_eq!(config.max_retries, 3);
+        assert!(config.max_matching_requests_per_second.is_none());
         assert!(!config.has_credentials());
     }
 

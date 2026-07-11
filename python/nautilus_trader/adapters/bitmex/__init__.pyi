@@ -5,6 +5,7 @@ import enum
 import typing
 
 from nautilus_trader import model
+from nautilus_trader import network
 
 __all__ = [
     "BITMEX_HTTP_URL",
@@ -29,23 +30,6 @@ BITMEX_HTTP_URL: str
 BITMEX_WS_URL: str
 
 @typing.final
-class BitmexEnvironment(enum.Enum):
-    MAINNET = ...
-    TESTNET = ...
-
-    def __init__(self, value: typing.Any) -> None: ...
-    def __hash__(self) -> int: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def value(self) -> int: ...
-    @staticmethod
-    @classmethod
-    def variants() -> list[str]: ...
-    @classmethod
-    def from_str(cls, data: typing.Any) -> BitmexEnvironment: ...
-
-@typing.final
 class BitmexDataClientConfig:
     def __init__(
         self,
@@ -62,9 +46,10 @@ class BitmexDataClientConfig:
         recv_window_ms: int | None = None,
         active_only: bool | None = None,
         update_instruments_interval_mins: int | None = None,
-        use_testnet: bool | None = None,
+        environment: BitmexEnvironment | None = None,
         max_requests_per_second: int | None = None,
         max_requests_per_minute: int | None = None,
+        transport_backend: network.TransportBackend | None = None,
     ) -> None: ...
 
 @typing.final
@@ -88,7 +73,7 @@ class BitmexExecClientConfig:
         heartbeat_interval_secs: int | None = None,
         recv_window_ms: int | None = None,
         active_only: bool | None = None,
-        use_testnet: bool | None = None,
+        environment: BitmexEnvironment | None = None,
         account_id: model.AccountId | None = None,
         max_requests_per_second: int | None = None,
         max_requests_per_minute: int | None = None,
@@ -97,6 +82,7 @@ class BitmexExecClientConfig:
         submitter_proxy_urls: typing.Sequence[str] | None = None,
         canceller_proxy_urls: typing.Sequence[str] | None = None,
         deadmans_switch_timeout_secs: int | None = None,
+        transport_backend: network.TransportBackend | None = None,
     ) -> None: ...
 
 @typing.final
@@ -117,14 +103,14 @@ class BitmexHttpClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         base_url: str | None = None,
-        environment: BitmexEnvironment = BitmexEnvironment.MAINNET,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
-        max_requests_per_second: int | None = None,
-        max_requests_per_minute: int | None = None,
+        environment: BitmexEnvironment = ...,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1000,
+        retry_delay_max_ms: int = 10000,
+        recv_window_ms: int = 10000,
+        max_requests_per_second: int = 10,
+        max_requests_per_minute: int = 120,
         proxy_url: str | None = None,
     ) -> None: ...
     @staticmethod
@@ -152,6 +138,16 @@ class BitmexHttpClient:
         end: datetime.datetime | None = None,
         limit: int | None = None,
         partial: bool = False,
+    ) -> typing.Any: ...
+    def request_book_snapshot(
+        self, instrument_id: model.InstrumentId, depth: int | None = None
+    ) -> typing.Any: ...
+    def request_funding_rates(
+        self,
+        instrument_id: model.InstrumentId,
+        start: datetime.datetime | None = None,
+        end: datetime.datetime | None = None,
+        limit: int | None = None,
     ) -> typing.Any: ...
     def query_order(
         self,
@@ -232,14 +228,14 @@ class CancelBroadcaster:
         api_key: str | None = None,
         api_secret: str | None = None,
         base_url: str | None = None,
-        environment: BitmexEnvironment = BitmexEnvironment.MAINNET,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
-        max_requests_per_second: int | None = None,
-        max_requests_per_minute: int | None = None,
+        environment: BitmexEnvironment = ...,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1000,
+        retry_delay_max_ms: int = 5000,
+        recv_window_ms: int = 10000,
+        max_requests_per_second: int = 10,
+        max_requests_per_minute: int = 120,
         health_check_interval_secs: int = 30,
         health_check_timeout_secs: int = 5,
         expected_reject_patterns: typing.Sequence[str] | None = None,
@@ -275,8 +271,8 @@ class BitmexWebSocketClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         account_id: model.AccountId | None = None,
-        heartbeat: int | None = None,
-        environment: BitmexEnvironment = BitmexEnvironment.MAINNET,
+        heartbeat: int = 5,
+        environment: BitmexEnvironment = ...,
         proxy_url: str | None = None,
     ) -> None: ...
     @staticmethod
@@ -351,14 +347,14 @@ class SubmitBroadcaster:
         api_key: str | None = None,
         api_secret: str | None = None,
         base_url: str | None = None,
-        environment: BitmexEnvironment = BitmexEnvironment.MAINNET,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
-        max_requests_per_second: int | None = None,
-        max_requests_per_minute: int | None = None,
+        environment: BitmexEnvironment = ...,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1000,
+        retry_delay_max_ms: int = 5000,
+        recv_window_ms: int = 10000,
+        max_requests_per_second: int = 10,
+        max_requests_per_minute: int = 120,
         health_check_interval_secs: int = 30,
         health_check_timeout_secs: int = 5,
         expected_reject_patterns: typing.Sequence[str] | None = None,
@@ -391,6 +387,22 @@ class SubmitBroadcaster:
     def get_metrics(self) -> typing.Any: ...
     def get_client_stats(self) -> typing.Any: ...
     def cache_instrument(self, instrument: typing.Any) -> None: ...
+
+@typing.final
+class BitmexEnvironment(enum.Enum):
+    MAINNET = ...
+    TESTNET = ...
+
+    def __init__(self, value: typing.Any) -> None: ...
+    def __hash__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    @classmethod
+    def variants(cls) -> list[str]: ...
+    @classmethod
+    def from_str(cls, data: typing.Any) -> BitmexEnvironment: ...
 
 @typing.final
 class BitmexPositionSide(enum.Enum):

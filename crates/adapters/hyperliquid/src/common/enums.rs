@@ -226,7 +226,7 @@ pub enum HyperliquidOrderType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.hyperliquid")
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -265,7 +265,7 @@ pub enum HyperliquidTpSl {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.hyperliquid")
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
@@ -341,7 +341,7 @@ impl From<OrderType> for HyperliquidConditionalOrderType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.hyperliquid")
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -425,6 +425,8 @@ pub enum HyperliquidLiquidationMethod {
 #[strum(serialize_all = "camelCase")]
 pub enum HyperliquidPositionType {
     OneWay,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Hyperliquid TWAP order status.
@@ -438,6 +440,8 @@ pub enum HyperliquidTwapStatus {
     Terminated,
     Finished,
     Error,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -782,10 +786,18 @@ pub enum HyperliquidFillDirection {
     #[serde(rename = "Auto-Deleveraging")]
     #[strum(serialize = "Auto-Deleveraging")]
     AutoDeleveraging,
+    /// Vault-leader netting of child vault positions.
+    #[serde(rename = "Net Child Vaults")]
+    #[strum(serialize = "Net Child Vaults")]
+    NetChildVaults,
     /// Buying an asset (spot only).
     Buy,
     /// Selling an asset (spot only).
     Sell,
+    /// HIP-1 spot dust conversion: sub-lot spot balances sold to the quote token.
+    #[serde(rename = "Spot Dust Conversion")]
+    #[strum(serialize = "Spot Dust Conversion")]
+    SpotDustConversion,
     /// HIP-4 outcome settlement; venue closes side-token holdings at the
     /// resolved value (1 quote token for the winning side, 0 for the loser).
     #[serde(rename = "Settlement")]
@@ -811,6 +823,9 @@ pub enum HyperliquidFillDirection {
     #[serde(rename = "Negate Outcome")]
     #[strum(serialize = "Negate Outcome")]
     NegateOutcome,
+    /// Catch-all for unmodeled fill directions; informational only.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Represents info request types for the Hyperliquid info endpoint.
@@ -847,6 +862,8 @@ pub enum HyperliquidInfoRequestType {
     L2Book,
     /// Get all mid prices.
     AllMids,
+    /// Get recent public trades for a coin.
+    RecentTrades,
     /// Get user fills.
     UserFills,
     /// Get user fills by time range.
@@ -893,6 +910,8 @@ pub enum HyperliquidInfoRequestType {
     ValidatorStats,
     /// Get user fee schedule and effective rates.
     UserFees,
+    /// Get the list of perp dex descriptors.
+    PerpDexs,
     /// Get metadata for all perp dexes (standard + HIP-3).
     AllPerpMetas,
 }
@@ -907,6 +926,7 @@ impl HyperliquidInfoRequestType {
             Self::OutcomeMeta => "outcomeMeta",
             Self::L2Book => "l2Book",
             Self::AllMids => "allMids",
+            Self::RecentTrades => "recentTrades",
             Self::UserFills => "userFills",
             Self::UserFillsByTime => "userFillsByTime",
             Self::OrderStatus => "orderStatus",
@@ -930,6 +950,7 @@ impl HyperliquidInfoRequestType {
             Self::DelegatorRewards => "delegatorRewards",
             Self::ValidatorStats => "validatorStats",
             Self::UserFees => "userFees",
+            Self::PerpDexs => "perpDexs",
             Self::AllPerpMetas => "allPerpMetas",
         }
     }
@@ -972,7 +993,7 @@ pub enum HyperliquidLeverageType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.hyperliquid")
 )]
 #[serde(rename_all = "UPPERCASE")]
 #[strum(serialize_all = "UPPERCASE")]
@@ -1051,7 +1072,7 @@ fn is_outcome_wire_symbol(symbol: &str) -> bool {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.hyperliquid")
 )]
 pub enum HyperliquidEnvironment {
     /// Mainnet trading environment.
@@ -1143,6 +1164,14 @@ mod tests {
     }
 
     #[rstest]
+    fn test_info_request_type_recent_trades_as_str() {
+        assert_eq!(
+            HyperliquidInfoRequestType::RecentTrades.as_str(),
+            "recentTrades"
+        );
+    }
+
+    #[rstest]
     fn test_fill_direction_serde() {
         let cases = [
             (HyperliquidFillDirection::OpenLong, "\"Open Long\""),
@@ -1152,7 +1181,15 @@ mod tests {
                 HyperliquidFillDirection::AutoDeleveraging,
                 "\"Auto-Deleveraging\"",
             ),
+            (
+                HyperliquidFillDirection::NetChildVaults,
+                "\"Net Child Vaults\"",
+            ),
             (HyperliquidFillDirection::Buy, "\"Buy\""),
+            (
+                HyperliquidFillDirection::SpotDustConversion,
+                "\"Spot Dust Conversion\"",
+            ),
             (HyperliquidFillDirection::Settlement, "\"Settlement\""),
             (HyperliquidFillDirection::SplitOutcome, "\"Split Outcome\""),
             (HyperliquidFillDirection::MergeOutcome, "\"Merge Outcome\""),
@@ -1173,6 +1210,30 @@ mod tests {
                 variant
             );
         }
+    }
+
+    #[rstest]
+    fn test_fill_direction_unknown_is_lenient() {
+        assert_eq!(
+            serde_json::from_str::<HyperliquidFillDirection>("\"Some New Direction\"").unwrap(),
+            HyperliquidFillDirection::Unknown,
+        );
+    }
+
+    #[rstest]
+    fn test_position_type_unknown_is_lenient() {
+        assert_eq!(
+            serde_json::from_str::<HyperliquidPositionType>("\"hedge\"").unwrap(),
+            HyperliquidPositionType::Unknown,
+        );
+    }
+
+    #[rstest]
+    fn test_twap_status_unknown_is_lenient() {
+        assert_eq!(
+            serde_json::from_str::<HyperliquidTwapStatus>("\"paused\"").unwrap(),
+            HyperliquidTwapStatus::Unknown,
+        );
     }
 
     #[rstest]

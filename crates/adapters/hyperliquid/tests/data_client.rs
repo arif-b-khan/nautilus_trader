@@ -21,7 +21,11 @@
 //! Note: WebSocket subscription tests are in websocket.rs (50+ tests).
 
 use std::{
-    collections::HashMap, net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc,
+    collections::HashMap,
+    net::SocketAddr,
+    num::NonZeroUsize,
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
     time::Duration,
 };
 
@@ -35,6 +39,7 @@ use axum::{
     routing::post,
 };
 use futures_util::StreamExt;
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use nautilus_common::{
     clients::DataClient,
     live::runner::set_data_event_sender,
@@ -56,7 +61,7 @@ use nautilus_hyperliquid::{
     },
     config::HyperliquidDataClientConfig,
     data::HyperliquidDataClient,
-    data_types::HyperliquidOpenInterest,
+    data_types::{HyperliquidAllDexsAssetCtxs, HyperliquidOpenInterest},
     http::{
         models::{HyperliquidL2Book, PerpMeta},
         query::InfoRequest,
@@ -78,6 +83,60 @@ struct TestServerState {
     last_request_type: Arc<tokio::sync::Mutex<Option<String>>>,
     subscriptions: Arc<tokio::sync::Mutex<Vec<Value>>>,
     unsubscriptions: Arc<tokio::sync::Mutex<Vec<Value>>>,
+    asset_context_updates: Arc<tokio::sync::Notify>,
+    bbo_updates: Arc<tokio::sync::Notify>,
+    withhold_l2_book: Arc<tokio::sync::Mutex<bool>>,
+    // When set, the `recentTrades` info endpoint responds with HTTP 422 to
+    // emulate a node without the Hyperliquid indexer.
+    recent_trades_unavailable: Arc<tokio::sync::Mutex<bool>>,
+}
+
+#[derive(Default)]
+struct CapturingWarnLogger {
+    messages: StdMutex<Vec<String>>,
+}
+
+impl CapturingWarnLogger {
+    fn clear(&self) {
+        self.messages
+            .lock()
+            .expect("log collector mutex poisoned")
+            .clear();
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .expect("log collector mutex poisoned")
+            .clone()
+    }
+}
+
+impl Log for CapturingWarnLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= Level::Warn
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata()) {
+            self.messages
+                .lock()
+                .expect("log collector mutex poisoned")
+                .push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static CAPTURING_WARN_LOGGER: OnceLock<CapturingWarnLogger> = OnceLock::new();
+
+fn install_capturing_warn_logger() -> &'static CapturingWarnLogger {
+    let logger = CAPTURING_WARN_LOGGER.get_or_init(CapturingWarnLogger::default);
+    let _ = log::set_logger(logger);
+    log::set_max_level(LevelFilter::Warn);
+    logger.clear();
+    logger
 }
 
 fn data_path() -> PathBuf {
@@ -98,6 +157,7 @@ fn spot_meta_fixture() -> Value {
         "tokens": [
             {"name": "USDC", "szDecimals": 6, "weiDecimals": 6, "index": 0, "tokenId": "0x1", "isCanonical": true},
             {"name": "PURR", "szDecimals": 0, "weiDecimals": 5, "index": 1, "tokenId": "0x2", "isCanonical": true},
+            {"name": "USDH", "szDecimals": 2, "weiDecimals": 8, "index": 360, "tokenId": "0x168", "isCanonical": true},
         ],
         "universe": [
             {"name": "PURR/USDC", "tokens": [1, 0], "index": 0, "isCanonical": true},
@@ -148,13 +208,16 @@ async fn handle_info(State(state): State<TestServerState>, body: axum::body::Byt
         "allPerpMetas" => {
             let standard_meta = load_json("http_meta_perp_sample.json");
             let hip3_meta = json!({
+                "collateralToken": 360,
                 "universe": [
+                    {"name": "xyz:XYZ100", "szDecimals": 4, "maxLeverage": 30, "growthMode": "enabled"},
                     {"name": "xyz:TSLA", "szDecimals": 3, "maxLeverage": 10, "growthMode": "enabled", "marginMode": "strictIsolated"},
                     {"name": "xyz:NVDA", "szDecimals": 3, "maxLeverage": 20}
                 ]
             });
             Json(json!([standard_meta, hip3_meta])).into_response()
         }
+        "perpDexs" => Json(json!([null, {"name": "xyz"}])).into_response(),
         "metaAndAssetCtxs" => {
             let meta = load_json("http_meta_perp_sample.json");
             Json(json!([meta, []])).into_response()
@@ -165,6 +228,16 @@ async fn handle_info(State(state): State<TestServerState>, body: axum::body::Byt
         "l2Book" => {
             let book = load_json("http_l2_book_btc.json");
             Json(book).into_response()
+        }
+        "recentTrades" => {
+            if *state.recent_trades_unavailable.lock().await {
+                return (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({"error": "recentTrades unavailable"})),
+                )
+                    .into_response();
+            }
+            Json(load_json("http_recent_trades_btc.json")).into_response()
         }
         "candleSnapshot" => Json(json!([{
             "t": 1703875200000u64,
@@ -409,7 +482,34 @@ async fn handle_ws_upgrade(ws: WebSocketUpgrade, State(state): State<TestServerS
 }
 
 async fn handle_ws_socket(mut socket: WebSocket, state: TestServerState) {
-    while let Some(message) = socket.next().await {
+    loop {
+        let message = tokio::select! {
+            message = socket.next() => message,
+            () = state.asset_context_updates.notified() => {
+                if socket
+                    .send(Message::Text(active_asset_ctx_message().to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+
+                continue;
+            }
+            () = state.bbo_updates.notified() => {
+                if socket
+                    .send(Message::Text(bbo_message().to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+
+                continue;
+            }
+        };
+
+        let Some(message) = message else { break };
         let Ok(message) = message else { break };
 
         match message {
@@ -438,7 +538,7 @@ async fn handle_ws_socket(mut socket: WebSocket, state: TestServerState) {
                                     .unwrap_or("");
 
                                 let data_msg = match sub_type {
-                                    "trades" => json!({
+                                    "trades" => Some(json!({
                                         "channel": "trades",
                                         "data": [{
                                             "coin": "BTC",
@@ -450,47 +550,28 @@ async fn handle_ws_socket(mut socket: WebSocket, state: TestServerState) {
                                             "tid": 100001u64,
                                             "users": ["0xbuyer", "0xseller"]
                                         }]
-                                    }),
-                                    "bbo" => json!({
-                                        "channel": "bbo",
-                                        "data": {
-                                            "coin": "BTC",
-                                            "time": 1703875200000u64,
-                                            "bbo": [
-                                                {"px": "98450.00", "sz": "1.5", "n": 3},
-                                                {"px": "98451.00", "sz": "2.0", "n": 2}
-                                            ]
-                                        }
-                                    }),
+                                    })),
+                                    "bbo" => Some(bbo_message()),
                                     "l2Book" => {
-                                        let book_data = load_json("ws_book_data.json");
-                                        json!({"channel": "l2Book", "data": book_data})
-                                    }
-                                    "activeAssetCtx" => json!({
-                                        "channel": "activeAssetCtx",
-                                        "data": {
-                                            "coin": "BTC",
-                                            "ctx": {
-                                                "dayNtlVlm": "1000000.0",
-                                                "prevDayPx": "97000.0",
-                                                "markPx": "98455.5",
-                                                "midPx": "98455.0",
-                                                "impactPxs": ["98454.0", "98456.0"],
-                                                "dayBaseVlm": "100.0",
-                                                "funding": "0.0001",
-                                                "openInterest": "1500.0",
-                                                "oraclePx": "98460.0",
-                                                "premium": "-0.0001"
-                                            }
+                                        if *state.withhold_l2_book.lock().await {
+                                            None
+                                        } else {
+                                            let book_data = load_json("ws_book_data.json");
+                                            Some(json!({"channel": "l2Book", "data": book_data}))
                                         }
-                                    }),
-                                    _ => json!({"channel": sub_type, "data": {}}),
+                                    }
+                                    "activeAssetCtx" => Some(active_asset_ctx_message()),
+                                    "allDexsAssetCtxs" => {
+                                        Some(load_json("ws_all_dexs_asset_ctxs.json"))
+                                    }
+                                    _ => Some(json!({"channel": sub_type, "data": {}})),
                                 };
 
-                                if socket
-                                    .send(Message::Text(data_msg.to_string().into()))
-                                    .await
-                                    .is_err()
+                                if let Some(data_msg) = data_msg
+                                    && socket
+                                        .send(Message::Text(data_msg.to_string().into()))
+                                        .await
+                                        .is_err()
                                 {
                                     break;
                                 }
@@ -510,7 +591,7 @@ async fn handle_ws_socket(mut socket: WebSocket, state: TestServerState) {
                 }
             }
             // Inner if consumes `data`, cannot hoist into a match guard
-            #[expect(clippy::collapsible_match)]
+            #[allow(clippy::collapsible_match)]
             Message::Ping(data) => {
                 if socket.send(Message::Pong(data)).await.is_err() {
                     break;
@@ -520,6 +601,41 @@ async fn handle_ws_socket(mut socket: WebSocket, state: TestServerState) {
             _ => {}
         }
     }
+}
+
+fn active_asset_ctx_message() -> Value {
+    json!({
+        "channel": "activeAssetCtx",
+        "data": {
+            "coin": "BTC",
+            "ctx": {
+                "dayNtlVlm": "1000000.0",
+                "prevDayPx": "97000.0",
+                "markPx": "98455.5",
+                "midPx": "98455.0",
+                "impactPxs": ["98454.0", "98456.0"],
+                "dayBaseVlm": "100.0",
+                "funding": "0.0001",
+                "openInterest": "1500.0",
+                "oraclePx": "98460.0",
+                "premium": "-0.0001"
+            }
+        }
+    })
+}
+
+fn bbo_message() -> Value {
+    json!({
+        "channel": "bbo",
+        "data": {
+            "coin": "BTC",
+            "time": 1703875200000u64,
+            "bbo": [
+                {"px": "98450.00", "sz": "1.5", "n": 3},
+                {"px": "98451.00", "sz": "2.0", "n": 2}
+            ]
+        }
+    })
 }
 
 fn create_data_client_config(addr: SocketAddr) -> HyperliquidDataClientConfig {
@@ -566,6 +682,64 @@ async fn wait_for_open_interest_event(
 ) {
     wait_until_async(
         || {
+            let found = rx
+                .try_recv()
+                .is_ok_and(|event| is_open_interest_event(event, instrument_id, &data_type));
+            async move { found }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+async fn wait_for_open_interest_event_after_asset_context_update(
+    state: &TestServerState,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    instrument_id: InstrumentId,
+    data_type: DataType,
+) {
+    wait_until_async(
+        || {
+            let found = rx
+                .try_recv()
+                .is_ok_and(|event| is_open_interest_event(event, instrument_id, &data_type));
+
+            if !found {
+                state.asset_context_updates.notify_one();
+            }
+
+            async move { found }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+fn is_open_interest_event(
+    event: DataEvent,
+    instrument_id: InstrumentId,
+    data_type: &DataType,
+) -> bool {
+    let DataEvent::Data(Data::Custom(custom)) = event else {
+        return false;
+    };
+
+    custom
+        .data
+        .as_any()
+        .downcast_ref::<HyperliquidOpenInterest>()
+        .is_some_and(|open_interest| {
+            open_interest.instrument_id == instrument_id
+                && open_interest.open_interest.to_string() == "1500.0"
+                && custom.data_type == *data_type
+        })
+}
+
+async fn wait_for_all_dex_asset_ctxs_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+) {
+    wait_until_async(
+        || {
             let found = rx.try_recv().is_ok_and(|event| {
                 let DataEvent::Data(Data::Custom(custom)) = event else {
                     return false;
@@ -574,11 +748,16 @@ async fn wait_for_open_interest_event(
                 custom
                     .data
                     .as_any()
-                    .downcast_ref::<HyperliquidOpenInterest>()
-                    .is_some_and(|open_interest| {
-                        open_interest.instrument_id == instrument_id
-                            && open_interest.open_interest.to_string() == "1500.0"
-                            && custom.data_type == data_type
+                    .downcast_ref::<HyperliquidAllDexsAssetCtxs>()
+                    .is_some_and(|payload| {
+                        payload.entries.iter().any(|entry| {
+                            entry.instrument_id == InstrumentId::from("BTC-USD-PERP.HYPERLIQUID")
+                                && entry.mark_price.to_string() == "77562.0"
+                        }) && payload.entries.iter().any(|entry| {
+                            entry.instrument_id
+                                == InstrumentId::from("xyz:TSLA-USD-PERP.HYPERLIQUID")
+                                && entry.dex == "xyz"
+                        })
                     })
             });
             async move { found }
@@ -649,12 +828,17 @@ async fn test_data_client_emits_hip3_instruments() {
 
     let mut standard_perp_symbols = Vec::new();
     let mut hip3_symbols = Vec::new();
+    let mut hip3_settlements = Vec::new();
     let mut spot_symbols = Vec::new();
 
     while let Ok(event) = rx.try_recv() {
         if let DataEvent::Instrument(instrument) = event {
             let symbol = instrument.id().symbol.to_string();
             if symbol.contains(':') {
+                hip3_settlements.push((
+                    symbol.clone(),
+                    instrument.settlement_currency().code.to_string(),
+                ));
                 hip3_symbols.push(symbol);
             } else if symbol.ends_with("-SPOT") {
                 spot_symbols.push(symbol);
@@ -664,13 +848,15 @@ async fn test_data_client_emits_hip3_instruments() {
         }
     }
 
-    // Mock returns 3 standard perps (BTC, ETH, ATOM), 2 HIP-3 (xyz:TSLA, xyz:NVDA),
+    // Mock returns 3 standard perps (BTC, ETH, ATOM), 3 HIP-3 (xyz:XYZ100, xyz:TSLA, xyz:NVDA),
     // and 1 spot (PURR-USDC-SPOT).
     assert_eq!(standard_perp_symbols.len(), 3);
-    assert_eq!(hip3_symbols.len(), 2);
+    assert_eq!(hip3_symbols.len(), 3);
     assert_eq!(spot_symbols.len(), 1);
+    assert!(hip3_symbols.contains(&"xyz:XYZ100-USD-PERP".to_string()));
     assert!(hip3_symbols.contains(&"xyz:TSLA-USD-PERP".to_string()));
     assert!(hip3_symbols.contains(&"xyz:NVDA-USD-PERP".to_string()));
+    assert!(hip3_settlements.contains(&("xyz:TSLA-USD-PERP".to_string(), "USDH".to_string(),)));
 
     client.disconnect().await.unwrap();
 }
@@ -918,6 +1104,25 @@ async fn test_data_client_shared_asset_context_subscription_with_open_interest()
     )
     .await;
 
+    wait_for_open_interest_event_after_asset_context_update(
+        &state,
+        &mut rx,
+        instrument_id,
+        data_type.clone(),
+    )
+    .await;
+
+    let active_asset_ctx_subscriptions = state
+        .subscriptions
+        .lock()
+        .await
+        .iter()
+        .filter(|subscription| {
+            subscription.get("type").and_then(|value| value.as_str()) == Some("activeAssetCtx")
+        })
+        .count();
+    assert_eq!(active_asset_ctx_subscriptions, 1);
+
     client
         .unsubscribe(&UnsubscribeCustomData::new(
             Some(*HYPERLIQUID_CLIENT_ID),
@@ -1069,6 +1274,82 @@ async fn test_data_client_resubscribe_custom_open_interest_emits_initial_value_a
 
 #[rstest]
 #[tokio::test]
+async fn test_data_client_subscribe_all_dex_asset_ctxs_custom_data() {
+    let state = TestServerState::default();
+    let addr = start_mock_server(state.clone()).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let config = create_data_client_config(addr);
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+    drain_initial_events(&mut rx).await;
+
+    let data_type = DataType::new("HyperliquidAllDexsAssetCtxs", None, None);
+    client
+        .subscribe(SubscribeCustomData::new(
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            data_type.clone(),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    wait_until_async(
+        || {
+            let state = state.clone();
+            async move {
+                state.subscriptions.lock().await.iter().any(|subscription| {
+                    subscription.get("type").and_then(|value| value.as_str())
+                        == Some("allDexsAssetCtxs")
+                })
+            }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    wait_for_all_dex_asset_ctxs_event(&mut rx).await;
+
+    client
+        .unsubscribe(&UnsubscribeCustomData::new(
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            data_type,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    wait_until_async(
+        || {
+            let state = state.clone();
+            async move {
+                state
+                    .unsubscriptions
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|subscription| {
+                        subscription.get("type").and_then(|value| value.as_str())
+                            == Some("allDexsAssetCtxs")
+                    })
+            }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
 async fn test_data_client_subscribe_book_deltas() {
     let state = TestServerState::default();
     let addr = start_mock_server(state).await;
@@ -1104,6 +1385,302 @@ async fn test_data_client_subscribe_book_deltas() {
     assert!(
         matches!(event, DataEvent::Data(Data::Deltas(_))),
         "Expected Deltas event, was: {event:?}"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_client_reports_stale_book_deltas_while_quotes_flow() {
+    let logger = install_capturing_warn_logger();
+    let state = TestServerState::default();
+    *state.withhold_l2_book.lock().await = true;
+    let addr = start_mock_server(state.clone()).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_data_client_config(addr);
+    config.stale_stream_receive_timeout_secs = 1;
+    config.stream_health_check_interval_secs = 1;
+    config.stale_stream_warning_cooldown_secs = 60;
+
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+    drain_initial_events(&mut rx).await;
+
+    let instrument_id = InstrumentId::from("BTC-USD-PERP.HYPERLIQUID");
+    client
+        .subscribe_book_deltas(SubscribeBookDeltas::new(
+            instrument_id,
+            BookType::L2_MBP,
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            false,
+            None,
+            None,
+        ))
+        .unwrap();
+    client
+        .subscribe_quotes(SubscribeQuotes::new(
+            instrument_id,
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let bbo_updates = Arc::clone(&state.bbo_updates);
+
+    let bbo_pump = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            interval.tick().await;
+            bbo_updates.notify_waiters();
+        }
+    });
+
+    wait_until_async(
+        || {
+            let found = loop {
+                match rx.try_recv() {
+                    Ok(DataEvent::Data(Data::Quote(_))) => break true,
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+            };
+            async move { found }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    wait_until_async(
+        || {
+            let messages = logger.messages();
+            let found_stale_book = messages.iter().any(|message| {
+                message.contains("Hyperliquid book stream stale while bbo advances")
+                    && message.contains("channel=deltas")
+                    && message.contains("instrument_id=BTC-USD-PERP.HYPERLIQUID")
+                    && message.contains("receive_age_ms=")
+                    && message.contains("venue_age_ms=n/a")
+                    && message.contains("stale_count=1")
+                    && message.contains("action=warn")
+            });
+            let found_stale_quote = messages
+                .iter()
+                .any(|message| message.contains("stale") && message.contains("channel=quote"));
+            async move { found_stale_book && !found_stale_quote }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    bbo_pump.abort();
+
+    let messages = logger.messages();
+    assert!(
+        messages.iter().any(|message| {
+            message.contains("Hyperliquid book stream stale while bbo advances")
+                && message.contains("channel=deltas")
+                && message.contains("instrument_id=BTC-USD-PERP.HYPERLIQUID")
+        }),
+        "stale book-deltas warning should be logged, messages were: {messages:?}",
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("stale") || !message.contains("channel=quote")),
+        "flowing quote stream should not be reported stale, messages were: {messages:?}",
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_client_stale_book_recovery_escalates_to_reconnect() {
+    let logger = install_capturing_warn_logger();
+    let state = TestServerState::default();
+    *state.withhold_l2_book.lock().await = true;
+    let addr = start_mock_server(state.clone()).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_data_client_config(addr);
+    config.stale_stream_receive_timeout_secs = 1;
+    config.stream_health_check_interval_secs = 1;
+    config.stale_stream_warning_cooldown_secs = 60;
+    config.stale_stream_recovery_enabled = true;
+    config.stale_stream_recovery_cooldown_secs = 1;
+    config.stale_stream_max_targeted_resubscribes = 1;
+
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+    drain_initial_events(&mut rx).await;
+
+    let instrument_id = InstrumentId::from("BTC-USD-PERP.HYPERLIQUID");
+    client
+        .subscribe_book_deltas(SubscribeBookDeltas::new(
+            instrument_id,
+            BookType::L2_MBP,
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            false,
+            None,
+            None,
+        ))
+        .unwrap();
+
+    wait_until_async(
+        || {
+            let state = state.clone();
+            let messages = logger.messages();
+            async move {
+                let resubscribed = state
+                    .unsubscriptions
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|sub| sub.get("type").and_then(Value::as_str) == Some("l2Book"));
+                let escalated = messages.iter().any(|message| {
+                    message.contains("action=reconnect") && message.contains("channel=deltas")
+                });
+                resubscribed && escalated
+            }
+        },
+        Duration::from_secs(15),
+    )
+    .await;
+
+    let messages = logger.messages();
+    assert!(
+        messages.iter().any(|message| {
+            message.contains("action=resubscribe")
+                && message.contains("channel=deltas")
+                && message.contains("instrument_id=BTC-USD-PERP.HYPERLIQUID")
+        }),
+        "targeted resubscribe decision should be logged, messages were: {messages:?}",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Requested full WebSocket reconnect")),
+        "reconnect escalation should be logged, messages were: {messages:?}",
+    );
+
+    let unsubscriptions = state.unsubscriptions.lock().await;
+    assert!(
+        unsubscriptions
+            .iter()
+            .any(|sub| sub.get("type").and_then(Value::as_str) == Some("l2Book")),
+        "targeted recovery should send an l2Book unsubscribe, was: {unsubscriptions:?}",
+    );
+    drop(unsubscriptions);
+
+    wait_until_async(
+        || {
+            let state = state.clone();
+            async move {
+                state
+                    .subscriptions
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|sub| sub.get("type").and_then(Value::as_str) == Some("l2Book"))
+                    .count()
+                    >= 3
+            }
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    client.disconnect().await.unwrap();
+}
+
+// The mock server sends one quote for each bbo subscribe
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_client_stale_quote_recovery_heals_without_reconnect() {
+    let logger = install_capturing_warn_logger();
+    let state = TestServerState::default();
+    let addr = start_mock_server(state.clone()).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_data_client_config(addr);
+    config.stale_stream_receive_timeout_secs = 1;
+    config.stream_health_check_interval_secs = 1;
+    config.stale_stream_warning_cooldown_secs = 60;
+    config.stale_stream_recovery_enabled = true;
+    config.stale_stream_recovery_cooldown_secs = 1;
+    // Avoid reconnect if the healing quote lands one tick late
+    config.stale_stream_max_targeted_resubscribes = 3;
+
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+    drain_initial_events(&mut rx).await;
+
+    let instrument_id = InstrumentId::from("BTC-USD-PERP.HYPERLIQUID");
+    client
+        .subscribe_quotes(SubscribeQuotes::new(
+            instrument_id,
+            Some(*HYPERLIQUID_CLIENT_ID),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    wait_until_async(
+        || {
+            let state = state.clone();
+            let messages = logger.messages();
+            async move {
+                let resubscribed = state
+                    .unsubscriptions
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|sub| sub.get("type").and_then(Value::as_str) == Some("bbo"));
+                let decision_logged = messages.iter().any(|message| {
+                    message.contains("action=resubscribe") && message.contains("channel=quote")
+                });
+                resubscribed && decision_logged
+            }
+        },
+        Duration::from_secs(15),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let messages = logger.messages();
+    assert!(
+        messages.iter().any(|message| {
+            message.contains("action=resubscribe")
+                && message.contains("channel=quote")
+                && message.contains("instrument_id=BTC-USD-PERP.HYPERLIQUID")
+        }),
+        "targeted bbo resubscribe decision should be logged, messages were: {messages:?}",
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("action=reconnect")),
+        "a healed stream must not escalate to reconnect, messages were: {messages:?}",
     );
 
     client.disconnect().await.unwrap();
@@ -1308,21 +1885,27 @@ async fn test_data_client_request_book_snapshot_with_depth() {
 }
 
 #[rstest]
-#[tokio::test]
-async fn test_request_trades_returns_not_supported_error() {
-    // Hyperliquid has no public trade-tape REST endpoint; `request_trades`
-    // must bail explicitly so callers see an unambiguous error rather than
-    // a silent empty response.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_client_request_trades() {
+    // `request_trades` fetches the `recentTrades` snapshot and always emits a
+    // `TradesResponse` so the awaiting caller completes.
     let state = TestServerState::default();
     let addr = start_mock_server(state).await;
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
 
     let config = create_data_client_config(addr);
-    let client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
 
+    // Drain instrument events from connect
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    while rx.try_recv().is_ok() {}
+
+    let instrument_id = InstrumentId::from("BTC-USD-PERP.HYPERLIQUID");
     let cmd = RequestTrades::new(
-        InstrumentId::from("BTC-USD-PERP.HYPERLIQUID"),
+        instrument_id,
         None,
         None,
         None,
@@ -1331,14 +1914,82 @@ async fn test_request_trades_returns_not_supported_error() {
         UnixNanos::default(),
         None,
     );
+    client.request_trades(cmd).unwrap();
 
-    let result = client.request_trades(cmd);
-    let err = result.expect_err("request_trades should bail");
-    let msg = err.to_string().to_lowercase();
-    assert!(
-        msg.contains("not supported"),
-        "error should explain why: {err}",
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timeout waiting for trades response")
+        .expect("channel closed");
+
+    match event {
+        DataEvent::Response(DataResponse::Trades(trades_response)) => {
+            assert_eq!(trades_response.instrument_id, instrument_id);
+            // Fixture carries three trades; the response is sorted ascending.
+            assert_eq!(trades_response.data.len(), 3);
+            assert_eq!(trades_response.data[0].trade_id.to_string(), "300001");
+            assert_eq!(trades_response.data[2].trade_id.to_string(), "300003");
+            assert!(
+                trades_response.data[0].ts_event <= trades_response.data[2].ts_event,
+                "trades should be ascending by ts_event",
+            );
+        }
+        other => panic!("Expected Trades response, was: {other:?}"),
+    }
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_client_request_trades_endpoint_unavailable() {
+    // A node without the indexer returns HTTP 422 for `recentTrades`; the
+    // client must still emit an empty `TradesResponse` rather than erroring.
+    let state = TestServerState::default();
+    *state.recent_trades_unavailable.lock().await = true;
+    let addr = start_mock_server(state).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let config = create_data_client_config(addr);
+    let mut client = HyperliquidDataClient::new(*HYPERLIQUID_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    // Drain instrument events from connect
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    while rx.try_recv().is_ok() {}
+
+    let instrument_id = InstrumentId::from("BTC-USD-PERP.HYPERLIQUID");
+    let cmd = RequestTrades::new(
+        instrument_id,
+        None,
+        None,
+        None,
+        Some(*HYPERLIQUID_CLIENT_ID),
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
     );
+    client.request_trades(cmd).unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timeout waiting for trades response")
+        .expect("channel closed");
+
+    match event {
+        DataEvent::Response(DataResponse::Trades(trades_response)) => {
+            assert_eq!(trades_response.instrument_id, instrument_id);
+            assert!(
+                trades_response.data.is_empty(),
+                "422 should yield an empty response, was: {:?}",
+                trades_response.data,
+            );
+        }
+        other => panic!("Expected empty Trades response, was: {other:?}"),
+    }
+
+    client.disconnect().await.unwrap();
 }
 
 #[rstest]

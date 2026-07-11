@@ -14,12 +14,14 @@
 // -------------------------------------------------------------------------------------------------
 
 use nautilus_model::identifiers::{AccountId, InstrumentId, TraderId};
+use nautilus_network::websocket::TransportBackend;
 use pyo3::pymethods;
 
 use crate::{
     common::enums::SignatureType,
     config::{
         PolymarketDataClientConfig, PolymarketExecClientConfig, PolymarketInstrumentProviderConfig,
+        PolymarketUpDownEventSlugConfig,
     },
 };
 
@@ -29,6 +31,41 @@ fn resolve_optional_u64_arg(value: Option<u64>, default: Option<u64>) -> Option<
     match value {
         Some(PY_OPTION_U64_MISSING_SENTINEL) => default,
         other => other,
+    }
+}
+
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl PolymarketUpDownEventSlugConfig {
+    /// Rust-backed event slug builder for Polymarket Up/Down markets.
+    ///
+    /// Up/Down event slugs follow the pattern
+    /// `{asset}-updown-{interval_mins}m-{unix_timestamp}`, where the timestamp is
+    /// aligned to the start of the interval. The builder emits slugs for each
+    /// configured asset and period.
+    #[new]
+    #[pyo3(signature = (assets=None, interval_mins=None, periods=None, start_offset_periods=None))]
+    fn py_new(
+        assets: Option<Vec<String>>,
+        interval_mins: Option<u64>,
+        periods: Option<u64>,
+        start_offset_periods: Option<i64>,
+    ) -> Self {
+        let default = Self::default();
+        Self {
+            assets: assets.unwrap_or(default.assets),
+            interval_mins: interval_mins.unwrap_or(default.interval_mins),
+            periods: periods.unwrap_or(default.periods),
+            start_offset_periods: start_offset_periods.unwrap_or(default.start_offset_periods),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __str__(&self) -> String {
+        format!("{self:?}")
     }
 }
 
@@ -48,7 +85,7 @@ impl PolymarketInstrumentProviderConfig {
         filters: Option<std::collections::HashMap<String, String>>,
         event_slugs: Option<Vec<String>>,
         market_slugs: Option<Vec<String>>,
-        event_slug_builder: Option<String>,
+        event_slug_builder: Option<PolymarketUpDownEventSlugConfig>,
         log_warnings: Option<bool>,
         use_gamma_markets: Option<bool>,
     ) -> Self {
@@ -83,7 +120,7 @@ impl PolymarketDataClientConfig {
     /// and are skipped during serialization; they default to empty/`None` and must be
     /// installed programmatically after deserialization.
     #[new]
-    #[pyo3(signature = (instrument_config=None, base_url_http=None, base_url_ws=None, base_url_gamma=None, base_url_data_api=None, http_timeout_secs=None, ws_timeout_secs=None, ws_max_subscriptions=None, update_instruments_interval_mins=PY_OPTION_U64_MISSING_SENTINEL, subscribe_new_markets=None, auto_load_missing_instruments=None, auto_load_debounce_ms=None, auto_load_max_retries=None, auto_load_retry_delay_initial_secs=None, auto_load_retry_delay_max_secs=None))]
+    #[pyo3(signature = (instrument_config=None, base_url_http=None, base_url_ws=None, base_url_gamma=None, base_url_data_api=None, http_timeout_secs=None, ws_timeout_secs=None, ws_max_subscriptions=None, update_instruments_interval_mins=PY_OPTION_U64_MISSING_SENTINEL, subscribe_new_markets=None, auto_load_missing_instruments=None, auto_load_debounce_ms=None, auto_load_max_retries=None, auto_load_retry_delay_initial_secs=None, auto_load_retry_delay_max_secs=None, new_market_fetch_max_concurrency=None, resolve_poll_enabled=None, resolve_poll_interval_secs=None, resolve_poll_grace_secs=None, resolve_poll_max_wait_secs=None, base_url_rtds=None, transport_backend=None, drop_quotes_missing_side=None))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
         instrument_config: Option<PolymarketInstrumentProviderConfig>,
@@ -101,6 +138,14 @@ impl PolymarketDataClientConfig {
         auto_load_max_retries: Option<u32>,
         auto_load_retry_delay_initial_secs: Option<f64>,
         auto_load_retry_delay_max_secs: Option<f64>,
+        new_market_fetch_max_concurrency: Option<usize>,
+        resolve_poll_enabled: Option<bool>,
+        resolve_poll_interval_secs: Option<u64>,
+        resolve_poll_grace_secs: Option<u64>,
+        resolve_poll_max_wait_secs: Option<u64>,
+        base_url_rtds: Option<String>,
+        transport_backend: Option<TransportBackend>,
+        drop_quotes_missing_side: Option<bool>,
     ) -> Self {
         let default = Self::default();
 
@@ -108,6 +153,7 @@ impl PolymarketDataClientConfig {
             instrument_config,
             base_url_http,
             base_url_ws,
+            base_url_rtds,
             base_url_gamma,
             base_url_data_api,
             http_timeout_secs: http_timeout_secs.unwrap_or(default.http_timeout_secs),
@@ -118,6 +164,10 @@ impl PolymarketDataClientConfig {
                 default.update_instruments_interval_mins,
             ),
             subscribe_new_markets: subscribe_new_markets.unwrap_or(default.subscribe_new_markets),
+            drop_quotes_missing_side: drop_quotes_missing_side
+                .unwrap_or(default.drop_quotes_missing_side),
+            new_market_fetch_max_concurrency: new_market_fetch_max_concurrency
+                .unwrap_or(default.new_market_fetch_max_concurrency),
             auto_load_missing_instruments: auto_load_missing_instruments
                 .unwrap_or(default.auto_load_missing_instruments),
             auto_load_debounce_ms: auto_load_debounce_ms.unwrap_or(default.auto_load_debounce_ms),
@@ -126,9 +176,16 @@ impl PolymarketDataClientConfig {
                 .unwrap_or(default.auto_load_retry_delay_initial_secs),
             auto_load_retry_delay_max_secs: auto_load_retry_delay_max_secs
                 .unwrap_or(default.auto_load_retry_delay_max_secs),
+            resolve_poll_enabled: resolve_poll_enabled.unwrap_or(default.resolve_poll_enabled),
+            resolve_poll_interval_secs: resolve_poll_interval_secs
+                .unwrap_or(default.resolve_poll_interval_secs),
+            resolve_poll_grace_secs: resolve_poll_grace_secs
+                .unwrap_or(default.resolve_poll_grace_secs),
+            resolve_poll_max_wait_secs: resolve_poll_max_wait_secs
+                .unwrap_or(default.resolve_poll_max_wait_secs),
             filters: Vec::new(),
             new_market_filter: None,
-            transport_backend: default.transport_backend,
+            transport_backend: transport_backend.unwrap_or(default.transport_backend),
         }
     }
 
@@ -150,7 +207,7 @@ impl PolymarketExecClientConfig {
     /// derive list.
     #[new]
     #[expect(clippy::too_many_arguments)]
-    #[pyo3(signature = (trader_id=None, account_id=None, private_key=None, api_key=None, api_secret=None, passphrase=None, funder=None, signature_type=None, base_url_http=None, base_url_ws=None, base_url_data_api=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, ack_timeout_secs=None))]
+    #[pyo3(signature = (trader_id=None, account_id=None, private_key=None, api_key=None, api_secret=None, passphrase=None, funder=None, signature_type=None, base_url_http=None, base_url_ws=None, base_url_data_api=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, ack_timeout_secs=None, transport_backend=None))]
     fn py_new(
         trader_id: Option<String>,
         account_id: Option<String>,
@@ -168,6 +225,7 @@ impl PolymarketExecClientConfig {
         retry_delay_initial_ms: Option<u64>,
         retry_delay_max_ms: Option<u64>,
         ack_timeout_secs: Option<u64>,
+        transport_backend: Option<TransportBackend>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -188,7 +246,7 @@ impl PolymarketExecClientConfig {
                 .unwrap_or(default.retry_delay_initial_ms),
             retry_delay_max_ms: retry_delay_max_ms.unwrap_or(default.retry_delay_max_ms),
             ack_timeout_secs: ack_timeout_secs.unwrap_or(default.ack_timeout_secs),
-            transport_backend: default.transport_backend,
+            transport_backend: transport_backend.unwrap_or(default.transport_backend),
         }
     }
 
@@ -204,8 +262,8 @@ impl PolymarketExecClientConfig {
 #[cfg(test)]
 mod tests {
     use pyo3::{
-        Bound, Python,
-        types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple},
+        Bound, IntoPyObject, Python,
+        types::{PyAnyMethods, PyDict, PyDictMethods, PyTuple},
     };
     use rstest::rstest;
 
@@ -216,11 +274,7 @@ mod tests {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PolymarketDataClientConfig {
-        let module = PyModule::new(py, "polymarket").expect("module");
-        crate::python::polymarket(py, &module).expect("polymarket module");
-        let cls = module
-            .getattr("PolymarketDataClientConfig")
-            .expect("PolymarketDataClientConfig");
+        let cls = py.get_type::<PolymarketDataClientConfig>();
 
         let config = match args {
             Some(args) => cls.call(args, kwargs),
@@ -258,6 +312,7 @@ mod tests {
                 config.update_instruments_interval_mins,
                 PolymarketDataClientConfig::default().update_instruments_interval_mins,
             );
+            assert!(config.drop_quotes_missing_side);
         });
     }
 
@@ -277,6 +332,7 @@ mod tests {
                     py.None(),
                     py.None(),
                     py.None(),
+                    py.None(),
                 ],
             )
             .expect("args");
@@ -284,6 +340,154 @@ mod tests {
             let config = construct_data_client_config(py, Some(&args), None);
 
             assert_eq!(config.update_instruments_interval_mins, None);
+        });
+    }
+
+    #[rstest]
+    fn direct_pyo3_constructor_sets_new_market_fetch_max_concurrency() {
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("new_market_fetch_max_concurrency", 23)
+                .unwrap();
+
+            let config = construct_data_client_config(py, None, Some(&kwargs));
+
+            assert_eq!(config.new_market_fetch_max_concurrency, 23);
+        });
+    }
+
+    #[rstest]
+    fn direct_pyo3_constructor_sets_drop_quotes_missing_side() {
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("drop_quotes_missing_side", false).unwrap();
+
+            let config = construct_data_client_config(py, None, Some(&kwargs));
+
+            assert!(!config.drop_quotes_missing_side);
+        });
+    }
+
+    #[rstest]
+    fn direct_pyo3_constructor_sets_base_url_rtds() {
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("base_url_rtds", "wss://ws-live-data.example")
+                .unwrap();
+
+            let config = construct_data_client_config(py, None, Some(&kwargs));
+
+            assert_eq!(
+                config.base_url_rtds.as_deref(),
+                Some("wss://ws-live-data.example")
+            );
+        });
+    }
+
+    #[rstest]
+    fn direct_pyo3_constructor_preserves_existing_positional_order() {
+        Python::initialize();
+        Python::attach(|py| {
+            let args = PyTuple::new(
+                py,
+                [
+                    py.None(),
+                    "https://http.example"
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                    "wss://ws.example"
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                    "https://gamma.example"
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                    "https://data.example"
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                    41_u64.into_pyobject(py).unwrap().into_any().unbind(),
+                    42_u64.into_pyobject(py).unwrap().into_any().unbind(),
+                    512_usize.into_pyobject(py).unwrap().into_any().unbind(),
+                ],
+            )
+            .expect("args");
+
+            let config = construct_data_client_config(py, Some(&args), None);
+
+            assert_eq!(
+                config.base_url_http.as_deref(),
+                Some("https://http.example")
+            );
+            assert_eq!(config.base_url_ws.as_deref(), Some("wss://ws.example"));
+            assert_eq!(
+                config.base_url_gamma.as_deref(),
+                Some("https://gamma.example")
+            );
+            assert_eq!(
+                config.base_url_data_api.as_deref(),
+                Some("https://data.example")
+            );
+            assert_eq!(config.base_url_rtds, None);
+            assert_eq!(config.http_timeout_secs, 41);
+            assert_eq!(config.ws_timeout_secs, 42);
+            assert_eq!(config.ws_max_subscriptions, 512);
+        });
+    }
+
+    #[rstest]
+    fn direct_pyo3_constructor_preserves_base_url_rtds_positional_slot() {
+        Python::initialize();
+        Python::attach(|py| {
+            let args = PyTuple::new(
+                py,
+                [
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    py.None(),
+                    "wss://ws-live-data.example"
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                ],
+            )
+            .expect("args");
+
+            let config = construct_data_client_config(py, Some(&args), None);
+
+            assert_eq!(
+                config.base_url_rtds.as_deref(),
+                Some("wss://ws-live-data.example")
+            );
         });
     }
 }

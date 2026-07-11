@@ -28,7 +28,7 @@ use nautilus_model::{
 use rust_decimal_macros::dec;
 use ustr::Ustr;
 
-let order = self.core.order_factory().trailing_stop_limit(
+let order = self.order().trailing_stop_limit(
     InstrumentId::from("AUD/USD.CURRENEX"),
     OrderSide::Buy,
     Quantity::from(1_250_000),
@@ -37,7 +37,7 @@ let order = self.core.order_factory().trailing_stop_limit(
     dec!(0.00100),                   // trailing_offset
     Some(TrailingOffsetType::Price), // optional (default PRICE)
     Some(Price::from("0.72000")),    // activation_price
-    None,                            // trigger_price (falls back to activation_price)
+    None,                            // trigger_price (materializes from the offset on the first trail)
     Some(TriggerType::BidAsk),       // optional (default DEFAULT)
     Some(TimeInForce::Gtc),          // optional (default GTC)
     None,                            // expire_time

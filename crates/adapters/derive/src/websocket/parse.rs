@@ -23,8 +23,8 @@ use nautilus_core::{
 use nautilus_model::{
     data::{
         Bar, BarType, BookOrder, FundingRateUpdate, IndexPriceUpdate, MarkPriceUpdate,
-        OrderBookDelta, OrderBookDeltas, QuoteTick, TradeTick, greeks::OptionGreekValues,
-        option_chain::OptionGreeks,
+        OrderBookDelta, OrderBookDeltas, OrderBookDepth10, QuoteTick, TradeTick,
+        depth::DEPTH10_LEN, greeks::OptionGreekValues, option_chain::OptionGreeks,
     },
     enums::{AggressorSide, BarAggregation, BookAction, GreeksConvention, OrderSide, RecordFlag},
     identifiers::{InstrumentId, TradeId},
@@ -74,7 +74,7 @@ pub fn parse_public_ws_data(payload: &WsSubscriptionPayload) -> anyhow::Result<D
 ///
 /// Returns an error when `params.data` is not a Derive order book snapshot.
 pub fn parse_orderbook_msg(payload: &WsSubscriptionPayload) -> anyhow::Result<DeriveOrderbookMsg> {
-    let data = serde_json::from_value::<DeriveOrderbookData>(payload.data.clone())
+    let data = serde_json::from_str::<DeriveOrderbookData>(payload.data.get())
         .context("failed to decode Derive orderbook data")?;
     Ok(DeriveOrderbookMsg {
         channel: Ustr::from(payload.channel.as_str()),
@@ -88,7 +88,7 @@ pub fn parse_orderbook_msg(payload: &WsSubscriptionPayload) -> anyhow::Result<De
 ///
 /// Returns an error when `params.data` is not a list of Derive public trades.
 pub fn parse_trades_msg(payload: &WsSubscriptionPayload) -> anyhow::Result<DeriveTradesMsg> {
-    let trades = serde_json::from_value::<Vec<DerivePublicTrade>>(payload.data.clone())
+    let trades = serde_json::from_str::<Vec<DerivePublicTrade>>(payload.data.get())
         .context("failed to decode Derive trades data")?;
     Ok(DeriveTradesMsg {
         channel: Ustr::from(payload.channel.as_str()),
@@ -102,7 +102,7 @@ pub fn parse_trades_msg(payload: &WsSubscriptionPayload) -> anyhow::Result<Deriv
 ///
 /// Returns an error when `params.data` is not a Derive ticker payload.
 pub fn parse_ticker_msg(payload: &WsSubscriptionPayload) -> anyhow::Result<DeriveTickerMsg> {
-    let mut data = serde_json::from_value::<DeriveTickerData>(payload.data.clone())
+    let mut data = serde_json::from_str::<DeriveTickerData>(payload.data.get())
         .context("failed to decode Derive ticker data")?;
     data.apply_channel_context(payload.channel.as_str())
         .map_err(anyhow::Error::msg)?;
@@ -181,6 +181,60 @@ pub fn parse_orderbook_deltas(
     }
 
     OrderBookDeltas::new_checked(context.instrument_id, deltas)
+}
+
+/// Parses an order book snapshot message into a fixed top-10 depth update.
+///
+/// Derive sends snapshots for the requested order book channel. Missing levels
+/// are filled with zero-size orders so the fixed arrays are always populated.
+///
+/// # Errors
+///
+/// Returns an error when a price, size, or timestamp cannot be converted.
+pub fn parse_orderbook_depth10(
+    msg: &DeriveOrderbookMsg,
+    price_precision: u8,
+    size_precision: u8,
+    ts_init: UnixNanos,
+) -> anyhow::Result<OrderBookDepth10> {
+    let instrument_id = msg.data.instrument_id();
+    let timestamp =
+        u64::try_from(msg.data.timestamp).context("negative Derive orderbook timestamp")?;
+    let ts_event = timestamp_millis_to_nanos(timestamp, "timestamp")?;
+
+    let mut bids = [BookOrder::default(); DEPTH10_LEN];
+    let mut asks = [BookOrder::default(); DEPTH10_LEN];
+    let mut bid_counts = [0; DEPTH10_LEN];
+    let mut ask_counts = [0; DEPTH10_LEN];
+
+    fill_depth_side(
+        &mut bids,
+        &mut bid_counts,
+        &msg.data.bids,
+        OrderSide::Buy,
+        price_precision,
+        size_precision,
+    )?;
+    fill_depth_side(
+        &mut asks,
+        &mut ask_counts,
+        &msg.data.asks,
+        OrderSide::Sell,
+        price_precision,
+        size_precision,
+    )?;
+
+    Ok(OrderBookDepth10::new(
+        instrument_id,
+        bids,
+        asks,
+        bid_counts,
+        ask_counts,
+        RecordFlag::F_SNAPSHOT as u8,
+        timestamp,
+        ts_event,
+        ts_init,
+    ))
 }
 
 /// Parses a public trade message into a Nautilus trade tick.
@@ -330,6 +384,47 @@ fn push_level_delta(
         context.ts_event,
         context.ts_init,
     )?);
+    Ok(())
+}
+
+fn fill_depth_side(
+    orders: &mut [BookOrder; DEPTH10_LEN],
+    counts: &mut [u32; DEPTH10_LEN],
+    levels: &[DeriveOrderbookLevel],
+    side: OrderSide,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<()> {
+    let mut index = 0;
+
+    for level in levels {
+        let price = Price::from_decimal_dp(level.price(), price_precision)
+            .context("invalid Derive orderbook price")?;
+        let size = Quantity::from_decimal_dp(level.amount(), size_precision)
+            .context("invalid Derive orderbook amount")?;
+
+        if size.is_zero() {
+            continue;
+        }
+
+        orders[index] = BookOrder::new(side, price, size, 0);
+        counts[index] = 1;
+        index += 1;
+
+        if index == DEPTH10_LEN {
+            break;
+        }
+    }
+
+    for order in orders.iter_mut().skip(index) {
+        *order = BookOrder::new(
+            side,
+            Price::zero(price_precision),
+            Quantity::zero(size_precision),
+            0,
+        );
+    }
+
     Ok(())
 }
 
@@ -996,6 +1091,45 @@ mod tests {
     }
 
     #[rstest]
+    fn test_parse_orderbook_depth10_skips_zero_sizes_caps_and_zero_fills() {
+        let bids = Value::Array(
+            (0..12)
+                .map(|i| {
+                    let size = if i == 1 { "0" } else { "1" };
+                    json!([format!("{}", 3500 - i), size])
+                })
+                .collect(),
+        );
+        let asks = json!([["3501", "2"], ["3502", "0"], ["3503", "3"]]);
+        let payload = subscription_data_payload(
+            "orderbook.ETH-PERP.1.10",
+            &orderbook_json(1_700_000_000_000, &bids, &asks),
+        );
+
+        let msg = parse_orderbook_msg(&payload).unwrap();
+        let depth =
+            parse_orderbook_depth10(&msg, PRICE_PRECISION, SIZE_PRECISION, UnixNanos::from(123))
+                .unwrap();
+
+        assert_eq!(depth.instrument_id, InstrumentId::from("ETH-PERP.DERIVE"));
+        assert_eq!(depth.bids[0].price, price("3500"));
+        assert_eq!(depth.bids[1].price, price("3498"));
+        assert_eq!(depth.bids[9].price, price("3490"));
+        assert_eq!(depth.bid_counts[0], 1);
+        assert_eq!(depth.bid_counts[9], 1);
+        assert_eq!(depth.asks[0].price, price("3501"));
+        assert_eq!(depth.asks[1].price, price("3503"));
+        assert_eq!(depth.asks[2].price, Price::zero(PRICE_PRECISION));
+        assert_eq!(depth.asks[2].size, Quantity::zero(SIZE_PRECISION));
+        assert_eq!(depth.ask_counts[0], 1);
+        assert_eq!(depth.ask_counts[1], 1);
+        assert_eq!(depth.ask_counts[2], 0);
+        assert_eq!(depth.sequence, 1_700_000_000_000);
+        assert_eq!(depth.flags, RecordFlag::F_SNAPSHOT as u8);
+        assert_eq!(depth.ts_event, UnixNanos::from(1_700_000_000_000_000_000));
+    }
+
+    #[rstest]
     fn test_parse_trade_tick_maps_sell_direction() {
         let payload = subscription_data_payload(
             "trades.perp.ETH",
@@ -1310,7 +1444,7 @@ mod tests {
     fn test_parse_public_ws_data_rejects_unknown_channel() {
         let payload = WsSubscriptionPayload {
             channel: Ustr::from("wallet.ETH"),
-            data: json!({}),
+            data: serde_json::value::to_raw_value(&json!({})).unwrap(),
         };
 
         let err = parse_public_ws_data(&payload).expect_err("must reject unknown channel");

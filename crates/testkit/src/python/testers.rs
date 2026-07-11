@@ -15,10 +15,7 @@
 
 //! Python bindings for live tester configuration.
 
-use std::num::NonZeroUsize;
-
-use nautilus_common::actor::DataActorConfig;
-use nautilus_core::python::to_pyvalue_err;
+use nautilus_common::{actor::DataActorConfig, python::config_error_to_pyvalue_err};
 use nautilus_model::{
     data::BarType,
     enums::TimeInForce,
@@ -112,7 +109,7 @@ impl DataTesterConfig {
         log_commands: Option<bool>,
     ) -> PyResult<Self> {
         let defaults = Self::default();
-        Ok(Self {
+        let config = Self {
             base: DataActorConfig {
                 actor_id,
                 log_events: log_events.unwrap_or(defaults.base.log_events),
@@ -151,18 +148,15 @@ impl DataTesterConfig {
             request_book_deltas: request_book_deltas.unwrap_or(defaults.request_book_deltas),
             request_funding_rates: request_funding_rates.unwrap_or(defaults.request_funding_rates),
             book_type: defaults.book_type,
-            book_depth: book_depth
-                .map(|value| parse_non_zero_usize(value, "book_depth"))
-                .transpose()?,
-            book_interval_ms: match book_interval_ms {
-                Some(value) => parse_non_zero_usize(value, "book_interval_ms")?,
-                None => defaults.book_interval_ms,
-            },
+            book_depth,
+            book_interval_ms: book_interval_ms.unwrap_or(defaults.book_interval_ms),
             book_levels_to_print: book_levels_to_print.unwrap_or(defaults.book_levels_to_print),
             manage_book: manage_book.unwrap_or(defaults.manage_book),
             log_data: log_data.unwrap_or(defaults.log_data),
             stats_interval_secs: stats_interval_secs.unwrap_or(defaults.stats_interval_secs),
-        })
+        };
+        config.validate().map_err(config_error_to_pyvalue_err)?;
+        Ok(config)
     }
 
     fn __repr__(&self) -> String {
@@ -183,6 +177,8 @@ impl ExecTesterConfig {
     #[pyo3(signature = (
         strategy_id = None,
         order_id_tag = None,
+        use_hyphens_in_client_order_ids = None,
+        use_uuid_client_order_ids = None,
         external_order_claims = None,
         instrument_id = None,
         client_id = None,
@@ -201,6 +197,8 @@ impl ExecTesterConfig {
         limit_time_in_force = None,
         use_post_only = None,
         limit_aggressive = None,
+        use_quote_quantity = None,
+        use_individual_cancels_on_stop = None,
         cancel_orders_on_stop = None,
         close_positions_on_stop = None,
         close_positions_time_in_force = None,
@@ -215,6 +213,8 @@ impl ExecTesterConfig {
     fn py_new(
         strategy_id: Option<StrategyId>,
         order_id_tag: Option<String>,
+        use_hyphens_in_client_order_ids: Option<bool>,
+        use_uuid_client_order_ids: Option<bool>,
         external_order_claims: Option<Vec<InstrumentId>>,
         instrument_id: Option<InstrumentId>,
         client_id: Option<ClientId>,
@@ -233,6 +233,8 @@ impl ExecTesterConfig {
         limit_time_in_force: Option<TimeInForce>,
         use_post_only: Option<bool>,
         limit_aggressive: Option<bool>,
+        use_quote_quantity: Option<bool>,
+        use_individual_cancels_on_stop: Option<bool>,
         cancel_orders_on_stop: Option<bool>,
         close_positions_on_stop: Option<bool>,
         close_positions_time_in_force: Option<TimeInForce>,
@@ -249,6 +251,10 @@ impl ExecTesterConfig {
             base: StrategyConfig {
                 strategy_id,
                 order_id_tag,
+                use_hyphens_in_client_order_ids: use_hyphens_in_client_order_ids
+                    .unwrap_or(defaults.base.use_hyphens_in_client_order_ids),
+                use_uuid_client_order_ids: use_uuid_client_order_ids
+                    .unwrap_or(defaults.base.use_uuid_client_order_ids),
                 external_order_claims,
                 log_events: log_events.unwrap_or(defaults.base.log_events),
                 log_commands: log_commands.unwrap_or(defaults.base.log_commands),
@@ -297,14 +303,15 @@ impl ExecTesterConfig {
                 .cancel_replace_stop_orders_to_maintain_offset,
             use_post_only: use_post_only.unwrap_or(defaults.use_post_only),
             limit_aggressive: limit_aggressive.unwrap_or(defaults.limit_aggressive),
-            use_quote_quantity: defaults.use_quote_quantity,
+            use_quote_quantity: use_quote_quantity.unwrap_or(defaults.use_quote_quantity),
             emulation_trigger: defaults.emulation_trigger,
+            use_individual_cancels_on_stop: use_individual_cancels_on_stop
+                .unwrap_or(defaults.use_individual_cancels_on_stop),
             cancel_orders_on_stop: cancel_orders_on_stop.unwrap_or(defaults.cancel_orders_on_stop),
             close_positions_on_stop: close_positions_on_stop
                 .unwrap_or(defaults.close_positions_on_stop),
             close_positions_time_in_force,
             reduce_only_on_stop: reduce_only_on_stop.unwrap_or(defaults.reduce_only_on_stop),
-            use_individual_cancels_on_stop: defaults.use_individual_cancels_on_stop,
             use_batch_cancel_on_stop: defaults.use_batch_cancel_on_stop,
             dry_run: dry_run.unwrap_or(defaults.dry_run),
             log_data: log_data.unwrap_or(defaults.log_data),
@@ -320,9 +327,4 @@ impl ExecTesterConfig {
     fn __repr__(&self) -> String {
         format!("{self:?}")
     }
-}
-
-fn parse_non_zero_usize(value: usize, field: &str) -> PyResult<NonZeroUsize> {
-    NonZeroUsize::new(value)
-        .ok_or_else(|| to_pyvalue_err(format!("{field} must be greater than 0")))
 }

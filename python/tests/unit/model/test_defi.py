@@ -13,6 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+import operator
+
+import pytest
 
 from nautilus_trader.model import AmmType
 from nautilus_trader.model import Block
@@ -23,6 +26,8 @@ from nautilus_trader.model import Dex
 from nautilus_trader.model import DexType
 from nautilus_trader.model import Pool
 from nautilus_trader.model import PoolFeeCollect
+from nautilus_trader.model import PoolFeeProtocolCollect
+from nautilus_trader.model import PoolFeeProtocolUpdate
 from nautilus_trader.model import PoolFlash
 from nautilus_trader.model import PoolLiquidityUpdate
 from nautilus_trader.model import PoolLiquidityUpdateType
@@ -119,6 +124,12 @@ def test_pool_event_types_construction():
         == "0x3333333333333333333333333333333333333333333333333333333333333333"
     )
     assert swap.sender == "0x0000000000000000000000000000000000000004"
+    assert swap.recipient == "0x0000000000000000000000000000000000000005"
+    assert swap.amount0 == "1"
+    assert swap.amount1 == "-2"
+    assert swap.sqrt_price_x96 == "79228162514264337593543950336"
+    assert swap.liquidity == "100"
+    assert swap.tick == 1
     assert swap.timestamp == 10
     assert swap.ts_event == 10
     assert swap.ts_init == 10
@@ -179,6 +190,7 @@ def test_pool_profiler_surface_methods():
     assert PoolProfiler.__name__ == "PoolProfiler"
     assert hasattr(PoolProfiler, "pool")
     assert hasattr(PoolProfiler, "current_tick")
+    assert hasattr(PoolProfiler, "price_sqrt_ratio_x96")
     assert hasattr(PoolProfiler, "swap_exact_in")
     assert hasattr(PoolProfiler, "swap_exact_out")
     assert hasattr(PoolProfiler, "size_for_impact_bps_detailed")
@@ -253,6 +265,40 @@ def _make_pool_flash(pool):
         amount1="2",
         paid0="3",
         paid1="4",
+        timestamp=10,
+    )
+
+
+def _make_pool_fee_protocol_update(pool):
+    return PoolFeeProtocolUpdate(
+        chain=pool.chain,
+        dex=pool.dex,
+        pool_identifier=pool.address,
+        instrument_id=pool.instrument_id,
+        block=1,
+        transaction_hash="0x7777777777777777777777777777777777777777777777777777777777777777",
+        transaction_index=0,
+        log_index=1,
+        fee_protocol0_new=2,
+        fee_protocol1_new=3,
+        timestamp=10,
+    )
+
+
+def _make_pool_fee_protocol_collect(pool):
+    return PoolFeeProtocolCollect(
+        chain=pool.chain,
+        dex=pool.dex,
+        pool_identifier=pool.address,
+        instrument_id=pool.instrument_id,
+        block=1,
+        transaction_hash="0x8888888888888888888888888888888888888888888888888888888888888888",
+        transaction_index=0,
+        log_index=1,
+        sender="0x0000000000000000000000000000000000000004",
+        recipient="0x0000000000000000000000000000000000000005",
+        amount0="1",
+        amount1="2",
         timestamp=10,
     )
 
@@ -333,3 +379,32 @@ def _make_transaction(chain):
         0,
         "0",
     )
+
+
+@pytest.mark.parametrize(
+    "value_factory",
+    [
+        pytest.param(lambda: Chain(Blockchain.BASE, 8453), id="chain"),
+        pytest.param(lambda: _make_token0(Chain(Blockchain.BASE, 8453)), id="token"),
+        pytest.param(lambda: _make_dex(Chain(Blockchain.BASE, 8453)), id="dex"),
+        pytest.param(_make_pool, id="pool"),
+        pytest.param(lambda: _make_pool_swap(_make_pool()), id="pool_swap"),
+        pytest.param(lambda: _make_pool_liquidity_update(_make_pool()), id="liquidity_update"),
+        pytest.param(lambda: _make_pool_fee_collect(_make_pool()), id="fee_collect"),
+        pytest.param(
+            lambda: _make_pool_fee_protocol_update(_make_pool()),
+            id="fee_protocol_update",
+        ),
+        pytest.param(
+            lambda: _make_pool_fee_protocol_collect(_make_pool()),
+            id="fee_protocol_collect",
+        ),
+        pytest.param(lambda: _make_pool_flash(_make_pool()), id="pool_flash"),
+        pytest.param(lambda: _make_transaction(Chain(Blockchain.BASE, 8453)), id="transaction"),
+    ],
+)
+def test_defi_ordering_comparisons_raise_type_error(value_factory):
+    value = value_factory()
+
+    with pytest.raises(TypeError):
+        operator.lt(value, value)

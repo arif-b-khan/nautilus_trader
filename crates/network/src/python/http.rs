@@ -144,6 +144,10 @@ impl HttpClient {
 
     /// Sends an HTTP request.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to send request or times out.
+    ///
     /// # Examples
     ///
     /// If requesting `/foo/bar`, pass rate-limit keys `["foo/bar", "foo"]`.
@@ -183,6 +187,10 @@ impl HttpClient {
     }
 
     /// Sends an HTTP GET request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to send request or times out.
     #[pyo3(name = "get")]
     #[pyo3(signature = (url, params=None, headers=None, keys=None, timeout_secs=None))]
     fn py_get<'py>(
@@ -205,6 +213,10 @@ impl HttpClient {
     }
 
     /// Sends an HTTP POST request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to send request or times out.
     #[expect(clippy::too_many_arguments)]
     #[pyo3(name = "post")]
     #[pyo3(signature = (url, params=None, headers=None, body=None, keys=None, timeout_secs=None))]
@@ -229,6 +241,10 @@ impl HttpClient {
     }
 
     /// Sends an HTTP PATCH request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to send request or times out.
     #[expect(clippy::too_many_arguments)]
     #[pyo3(name = "patch")]
     #[pyo3(signature = (url, params=None, headers=None, body=None, keys=None, timeout_secs=None))]
@@ -253,6 +269,10 @@ impl HttpClient {
     }
 
     /// Sends an HTTP DELETE request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to send request or times out.
     #[pyo3(name = "delete")]
     #[pyo3(signature = (url, params=None, headers=None, keys=None, timeout_secs=None))]
     fn py_delete<'py>(
@@ -333,7 +353,7 @@ fn params_to_hashmap(
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.network")]
 #[pyo3(signature = (url, params=None, headers=None, timeout_secs=None))]
 pub fn http_get(
-    _py: Python<'_>,
+    py: Python<'_>,
     url: String,
     params: Option<&Bound<'_, PyAny>>,
     headers: Option<HashMap<String, String>>,
@@ -341,19 +361,23 @@ pub fn http_get(
 ) -> PyResult<HttpResponse> {
     let params_map = params_to_hashmap(params)?;
 
-    join_blocking_http_thread(std::thread::spawn(move || {
-        let runtime = blocking_http_runtime()?;
+    // Release the GIL while blocking on the request so other Python threads keep running
+    py.detach(|| {
+        join_blocking_http_thread(std::thread::spawn(move || {
+            let runtime = blocking_http_runtime()?;
 
-        runtime.block_on(async {
-            let client = HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
-                .map_err(HttpClientError::into_py_err)?;
+            runtime.block_on(async {
+                let client =
+                    HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
+                        .map_err(HttpClientError::into_py_err)?;
 
-            client
-                .get(url, params_map.as_ref(), headers, timeout_secs, None)
-                .await
-                .map_err(HttpClientError::into_py_err)
-        })
-    }))
+                client
+                    .get(url, params_map.as_ref(), headers, timeout_secs, None)
+                    .await
+                    .map_err(HttpClientError::into_py_err)
+            })
+        }))
+    })
 }
 
 /// Blocking HTTP POST request.
@@ -372,7 +396,7 @@ pub fn http_get(
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.network")]
 #[pyo3(signature = (url, params=None, headers=None, body=None, timeout_secs=None))]
 pub fn http_post(
-    _py: Python<'_>,
+    py: Python<'_>,
     url: String,
     params: Option<&Bound<'_, PyAny>>,
     headers: Option<HashMap<String, String>>,
@@ -381,19 +405,23 @@ pub fn http_post(
 ) -> PyResult<HttpResponse> {
     let params_map = params_to_hashmap(params)?;
 
-    join_blocking_http_thread(std::thread::spawn(move || {
-        let runtime = blocking_http_runtime()?;
+    // Release the GIL while blocking on the request so other Python threads keep running
+    py.detach(|| {
+        join_blocking_http_thread(std::thread::spawn(move || {
+            let runtime = blocking_http_runtime()?;
 
-        runtime.block_on(async {
-            let client = HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
-                .map_err(HttpClientError::into_py_err)?;
+            runtime.block_on(async {
+                let client =
+                    HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
+                        .map_err(HttpClientError::into_py_err)?;
 
-            client
-                .post(url, params_map.as_ref(), headers, body, timeout_secs, None)
-                .await
-                .map_err(HttpClientError::into_py_err)
-        })
-    }))
+                client
+                    .post(url, params_map.as_ref(), headers, body, timeout_secs, None)
+                    .await
+                    .map_err(HttpClientError::into_py_err)
+            })
+        }))
+    })
 }
 
 /// Blocking HTTP PATCH request.
@@ -412,7 +440,7 @@ pub fn http_post(
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.network")]
 #[pyo3(signature = (url, params=None, headers=None, body=None, timeout_secs=None))]
 pub fn http_patch(
-    _py: Python<'_>,
+    py: Python<'_>,
     url: String,
     params: Option<&Bound<'_, PyAny>>,
     headers: Option<HashMap<String, String>>,
@@ -421,19 +449,23 @@ pub fn http_patch(
 ) -> PyResult<HttpResponse> {
     let params_map = params_to_hashmap(params)?;
 
-    join_blocking_http_thread(std::thread::spawn(move || {
-        let runtime = blocking_http_runtime()?;
+    // Release the GIL while blocking on the request so other Python threads keep running
+    py.detach(|| {
+        join_blocking_http_thread(std::thread::spawn(move || {
+            let runtime = blocking_http_runtime()?;
 
-        runtime.block_on(async {
-            let client = HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
-                .map_err(HttpClientError::into_py_err)?;
+            runtime.block_on(async {
+                let client =
+                    HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
+                        .map_err(HttpClientError::into_py_err)?;
 
-            client
-                .patch(url, params_map.as_ref(), headers, body, timeout_secs, None)
-                .await
-                .map_err(HttpClientError::into_py_err)
-        })
-    }))
+                client
+                    .patch(url, params_map.as_ref(), headers, body, timeout_secs, None)
+                    .await
+                    .map_err(HttpClientError::into_py_err)
+            })
+        }))
+    })
 }
 
 /// Blocking HTTP DELETE request.
@@ -452,7 +484,7 @@ pub fn http_patch(
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.network")]
 #[pyo3(signature = (url, params=None, headers=None, timeout_secs=None))]
 pub fn http_delete(
-    _py: Python<'_>,
+    py: Python<'_>,
     url: String,
     params: Option<&Bound<'_, PyAny>>,
     headers: Option<HashMap<String, String>>,
@@ -460,19 +492,23 @@ pub fn http_delete(
 ) -> PyResult<HttpResponse> {
     let params_map = params_to_hashmap(params)?;
 
-    join_blocking_http_thread(std::thread::spawn(move || {
-        let runtime = blocking_http_runtime()?;
+    // Release the GIL while blocking on the request so other Python threads keep running
+    py.detach(|| {
+        join_blocking_http_thread(std::thread::spawn(move || {
+            let runtime = blocking_http_runtime()?;
 
-        runtime.block_on(async {
-            let client = HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
-                .map_err(HttpClientError::into_py_err)?;
+            runtime.block_on(async {
+                let client =
+                    HttpClient::new(HashMap::new(), vec![], vec![], None, timeout_secs, None)
+                        .map_err(HttpClientError::into_py_err)?;
 
-            client
-                .delete(url, params_map.as_ref(), headers, timeout_secs, None)
-                .await
-                .map_err(HttpClientError::into_py_err)
-        })
-    }))
+                client
+                    .delete(url, params_map.as_ref(), headers, timeout_secs, None)
+                    .await
+                    .map_err(HttpClientError::into_py_err)
+            })
+        }))
+    })
 }
 
 fn blocking_http_runtime() -> PyResult<tokio::runtime::Runtime> {
@@ -508,7 +544,7 @@ fn join_blocking_http_thread(
 #[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.network")]
 #[pyo3(signature = (url, filepath, params=None, headers=None, timeout_secs=None))]
 pub fn http_download(
-    _py: Python<'_>,
+    py: Python<'_>,
     url: String,
     filepath: &str,
     params: Option<&Bound<'_, PyAny>>,
@@ -537,40 +573,44 @@ pub fn http_download(
         url
     };
 
-    let filepath = Path::new(filepath);
+    // Release the GIL for the blocking request and streaming copy so other
+    // Python threads keep running during large downloads
+    py.detach(|| {
+        let filepath = Path::new(filepath);
 
-    if let Some(parent) = filepath.parent() {
-        std::fs::create_dir_all(parent).map_err(to_pyvalue_err)?;
-    }
-
-    let mut client_builder = Client::builder();
-
-    if let Some(timeout) = timeout_secs {
-        client_builder = client_builder.timeout(Duration::from_secs(timeout));
-    }
-    let client = client_builder.build().map_err(to_pyvalue_err)?;
-
-    let mut request_builder = client.get(&full_url);
-
-    if let Some(headers_map) = headers {
-        for (key, value) in headers_map {
-            request_builder = request_builder.header(key, value);
+        if let Some(parent) = filepath.parent() {
+            std::fs::create_dir_all(parent).map_err(to_pyvalue_err)?;
         }
-    }
 
-    let mut response = request_builder.send().map_err(to_pyvalue_err)?;
+        let mut client_builder = Client::builder();
 
-    if !response.status().is_success() {
-        return Err(to_pyruntime_err(format!(
-            "HTTP error: {}",
-            response.status()
-        )));
-    }
+        if let Some(timeout) = timeout_secs {
+            client_builder = client_builder.timeout(Duration::from_secs(timeout));
+        }
+        let client = client_builder.build().map_err(to_pyvalue_err)?;
 
-    let mut file = File::create(filepath).map_err(to_pyvalue_err)?;
-    copy(&mut response, &mut file).map_err(to_pyvalue_err)?;
+        let mut request_builder = client.get(&full_url);
 
-    Ok(())
+        if let Some(headers_map) = headers {
+            for (key, value) in headers_map {
+                request_builder = request_builder.header(key, value);
+            }
+        }
+
+        let mut response = request_builder.send().map_err(to_pyvalue_err)?;
+
+        if !response.status().is_success() {
+            return Err(to_pyruntime_err(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
+        }
+
+        let mut file = File::create(filepath).map_err(to_pyvalue_err)?;
+        copy(&mut response, &mut file).map_err(to_pyvalue_err)?;
+
+        Ok(())
+    })
 }
 
 #[cfg(test)]

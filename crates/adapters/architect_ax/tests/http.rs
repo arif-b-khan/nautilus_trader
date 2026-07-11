@@ -18,9 +18,12 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use axum::{Router, http::StatusCode, response::Json, routing::get};
-use nautilus_architect_ax::http::{
-    client::{AxHttpClient, AxRawHttpClient},
-    error::AxHttpError,
+use nautilus_architect_ax::{
+    common::enums::AxCandleWidth,
+    http::{
+        client::{AxHttpClient, AxRawHttpClient},
+        error::AxHttpError,
+    },
 };
 use nautilus_common::testing::wait_until_async;
 use nautilus_model::instruments::InstrumentAny;
@@ -30,6 +33,13 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::{Value, json};
 use ustr::Ustr;
+
+#[derive(Debug, Clone, Copy)]
+enum RequiredInstrumentCachePath {
+    BookSnapshot,
+    Trades,
+    Bars,
+}
 
 /// Wait for the test server to be ready by polling a health endpoint.
 async fn wait_for_server(addr: SocketAddr, path: &str) {
@@ -87,14 +97,21 @@ fn create_router() -> Router {
             "/tickers",
             get(|| async {
                 Json(json!({
+                    "limit": 100,
+                    "offset": 0,
+                    "total_count": 1,
                     "tickers": [
                         {
-                            "symbol": "BTC-PERP",
-                            "bid": "45000.00",
-                            "ask": "45001.00",
-                            "last": "45000.50",
-                            "mark": "45000.25",
-                            "volume_24h": "1000000.00"
+                            "s": "BTC-PERP",
+                            "bp": "45000.00",
+                            "ap": "45001.00",
+                            "p": "45000.50",
+                            "m": "45000.25",
+                            "q": 1,
+                            "v": 1000000,
+                            "oi": 10,
+                            "ts": 1705314600,
+                            "tn": 0
                         }
                     ]
                 }))
@@ -104,12 +121,18 @@ fn create_router() -> Router {
             "/ticker",
             get(|| async {
                 Json(json!({
-                    "symbol": "BTC-PERP",
-                    "bid": "45000.00",
-                    "ask": "45001.00",
-                    "last": "45000.50",
-                    "mark": "45000.25",
-                    "volume_24h": "1000000.00"
+                    "ticker": {
+                        "s": "BTC-PERP",
+                        "bp": "45000.00",
+                        "ap": "45001.00",
+                        "p": "45000.50",
+                        "m": "45000.25",
+                        "q": 1,
+                        "v": 1000000,
+                        "oi": 10,
+                        "ts": 1705314600,
+                        "tn": 0
+                    }
                 }))
             }),
         )
@@ -248,6 +271,7 @@ async fn test_raw_http_get_tickers_returns_data() {
     let response = client.get_tickers().await.unwrap();
 
     assert_eq!(response.tickers.len(), 1);
+    assert_eq!(response.total_count, 1);
     let ticker = &response.tickers[0];
     assert_eq!(ticker.symbol.as_str(), "BTC-PERP");
     assert_eq!(ticker.bid, Some(dec!(45000.00)));
@@ -374,6 +398,46 @@ async fn test_domain_http_get_cached_instrument() {
 }
 
 // Error handling tests
+
+#[rstest]
+#[case::book_snapshot(RequiredInstrumentCachePath::BookSnapshot)]
+#[case::trades(RequiredInstrumentCachePath::Trades)]
+#[case::bars(RequiredInstrumentCachePath::Bars)]
+#[tokio::test]
+async fn test_public_market_data_request_missing_cached_instrument_returns_error(
+    #[case] path: RequiredInstrumentCachePath,
+) {
+    let client = AxHttpClient::new(
+        Some("http://127.0.0.1:9".to_string()),
+        None,
+        1,
+        0,
+        1,
+        1,
+        None,
+    )
+    .unwrap();
+    let symbol = Ustr::from("BTC-PERP");
+
+    let result = match path {
+        RequiredInstrumentCachePath::BookSnapshot => {
+            client.request_book_snapshot(symbol, None).await.map(|_| ())
+        }
+        RequiredInstrumentCachePath::Trades => client
+            .request_trade_ticks(symbol, None, None, None)
+            .await
+            .map(|_| ()),
+        RequiredInstrumentCachePath::Bars => client
+            .request_bars(symbol, None, None, AxCandleWidth::Minutes1)
+            .await
+            .map(|_| ()),
+    };
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        format!("Instrument {symbol} not found in cache")
+    );
+}
 
 #[rstest]
 #[tokio::test]

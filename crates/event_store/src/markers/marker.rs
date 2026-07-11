@@ -24,6 +24,8 @@ use crate::wire;
 
 const MARKER_HASH_DOMAIN: &[u8] = b"nautilus-event-store/marker/v1";
 const HIFI_HASH_DOMAIN: &[u8] = b"nautilus-event-store/hifi/v1";
+const DICT_HASH_DOMAIN: &[u8] = b"nautilus-event-store/dict/v1";
+const GAP_HASH_DOMAIN: &[u8] = b"nautilus-event-store/gap/v1";
 
 /// The class of market-data stream being tracked by a sidecar slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -119,7 +121,7 @@ pub struct HiFiMarker {
     /// The ingestion timestamp of the record (`ts_init`).
     #[serde(with = "wire::nanos_as_u64")]
     pub ts_init: UnixNanos,
-    /// Ordinal for records sharing the same `ts_event` within a slot.
+    /// Ordinal among records sharing the same `ts_init` within a slot.
     pub same_ts_ordinal: u32,
     /// A 32-byte fingerprint of the record's content.
     pub record_fingerprint: [u8; 32],
@@ -139,7 +141,7 @@ pub enum MarkerGapReason {
 pub struct MarkerGap {
     /// The first marker sequence number missing from the sequence.
     pub from_marker_seq: u64,
-    /// The first marker sequence number after the gap.
+    /// The last marker sequence number missing from the sequence.
     pub to_marker_seq: u64,
     /// The reason this gap was recorded.
     pub reason: MarkerGapReason,
@@ -197,11 +199,49 @@ pub fn compute_hifi_hash(marker: &HiFiMarker) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// Computes the canonical BLAKE3 hash of a [`StreamDictEntry`].
+///
+/// The hash is domain-separated by a crate-internal prefix, writes the numeric `slot`
+/// big-endian, and length-prefixes the data-class and identifier strings so a slot remapped to
+/// a different class or identifier cannot frame to the same byte stream. Store the returned
+/// bytes alongside the record; do not add a hash field to the struct itself.
+#[must_use]
+pub fn compute_dict_hash(entry: &StreamDictEntry) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DICT_HASH_DOMAIN);
+    hasher.update(&entry.slot.to_be_bytes());
+    let class = entry.data_cls.as_str().as_bytes();
+    hasher.update(&(class.len() as u64).to_be_bytes());
+    hasher.update(class);
+    let identifier = entry.identifier.as_bytes();
+    hasher.update(&(identifier.len() as u64).to_be_bytes());
+    hasher.update(identifier);
+    *hasher.finalize().as_bytes()
+}
+
+/// Computes the canonical BLAKE3 hash of a [`MarkerGap`].
+///
+/// The hash is domain-separated by a crate-internal prefix and uses big-endian fixed-width
+/// framing for the sequence bounds plus a one-byte reason discriminant. Store the returned bytes
+/// alongside the record; do not add a hash field to the struct itself.
+#[must_use]
+pub fn compute_gap_hash(gap: &MarkerGap) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(GAP_HASH_DOMAIN);
+    hasher.update(&gap.from_marker_seq.to_be_bytes());
+    hasher.update(&gap.to_marker_seq.to_be_bytes());
+    let reason = match gap.reason {
+        MarkerGapReason::Overflow => 0u8,
+        MarkerGapReason::WriterClosed => 1u8,
+    };
+    hasher.update(&[reason]);
+    *hasher.finalize().as_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fmt::Write, str::FromStr};
 
-    use proptest::{prelude::*, test_runner::Config as ProptestConfig};
     use rstest::rstest;
 
     use super::*;
@@ -259,6 +299,22 @@ mod tests {
         }
     }
 
+    fn baseline_dict() -> StreamDictEntry {
+        StreamDictEntry {
+            slot: 3,
+            data_cls: DataClass::Quote,
+            identifier: "ETHUSDT.BINANCE".to_string(),
+        }
+    }
+
+    fn baseline_gap() -> MarkerGap {
+        MarkerGap {
+            from_marker_seq: 5,
+            to_marker_seq: 9,
+            reason: MarkerGapReason::Overflow,
+        }
+    }
+
     fn hex32(bytes: &[u8; 32]) -> String {
         let mut out = String::with_capacity(64);
         for byte in bytes {
@@ -300,20 +356,50 @@ mod tests {
     }
 
     #[rstest]
-    fn marker_record_bincode_roundtrip() {
-        let cfg = bincode::config::standard();
+    fn dict_hash_is_deterministic() {
+        let entry = baseline_dict();
+        let h1 = compute_dict_hash(&entry);
+        let h2 = compute_dict_hash(&entry);
 
+        assert_eq!(h1, h2);
+
+        // Pinned wire-format vector. Any change to domain, field order, or framing flips this.
+        let hex = hex32(&h1);
+        assert_eq!(
+            hex, "24e702c5ae20b832ad6907676919fa18a89b79e97dde9df7e1de454191f42fda",
+            "dict hash wire format changed"
+        );
+    }
+
+    #[rstest]
+    fn gap_hash_is_deterministic() {
+        let gap = baseline_gap();
+        let h1 = compute_gap_hash(&gap);
+        let h2 = compute_gap_hash(&gap);
+
+        assert_eq!(h1, h2);
+
+        // Pinned wire-format vector. Any change to domain, field order, or framing flips this.
+        let hex = hex32(&h1);
+        assert_eq!(
+            hex, "ec1ae0ea813e9971155c6277e95c43de72da6f22ca1832f072aadd9b91f5a3ec",
+            "gap hash wire format changed"
+        );
+    }
+
+    #[rstest]
+    fn marker_record_codec_roundtrip() {
         // DataCursorSnapshot
         let snap = baseline_snapshot();
-        let bytes = bincode::serde::encode_to_vec(&snap, cfg).unwrap();
-        let (decoded, _): (DataCursorSnapshot, _) =
-            bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        let bytes = crate::codec::encode_to_vec(&snap).expect("encode");
+        let decoded =
+            crate::codec::decode_from_slice::<DataCursorSnapshot>(&bytes).expect("decode");
         assert_eq!(snap, decoded);
 
         // HiFiMarker
         let hifi = baseline_hifi();
-        let bytes = bincode::serde::encode_to_vec(&hifi, cfg).unwrap();
-        let (decoded, _): (HiFiMarker, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        let bytes = crate::codec::encode_to_vec(&hifi).expect("encode");
+        let decoded = crate::codec::decode_from_slice::<HiFiMarker>(&bytes).expect("decode");
         assert_eq!(hifi, decoded);
 
         // MarkerGap
@@ -322,8 +408,8 @@ mod tests {
             to_marker_seq: 10,
             reason: MarkerGapReason::Overflow,
         };
-        let bytes = bincode::serde::encode_to_vec(&gap, cfg).unwrap();
-        let (decoded, _): (MarkerGap, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        let bytes = crate::codec::encode_to_vec(&gap).expect("encode");
+        let decoded = crate::codec::decode_from_slice::<MarkerGap>(&bytes).expect("decode");
         assert_eq!(gap, decoded);
 
         // StreamDictEntry
@@ -332,9 +418,8 @@ mod tests {
             data_cls: DataClass::Bar,
             identifier: "BTCUSDT-PERP.BINANCE".to_string(),
         };
-        let bytes = bincode::serde::encode_to_vec(&dict, cfg).unwrap();
-        let (decoded, _): (StreamDictEntry, _) =
-            bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        let bytes = crate::codec::encode_to_vec(&dict).expect("encode");
+        let decoded = crate::codec::decode_from_slice::<StreamDictEntry>(&bytes).expect("decode");
         assert_eq!(dict, decoded);
     }
 
@@ -386,6 +471,30 @@ mod tests {
     }
 
     #[rstest]
+    #[case::slot(|e: &mut StreamDictEntry| e.slot = 99)]
+    #[case::data_cls(|e: &mut StreamDictEntry| e.data_cls = DataClass::Trade)]
+    #[case::identifier(|e: &mut StreamDictEntry| e.identifier = "BTCUSDT.BINANCE".to_string())]
+    fn every_dict_field_affects_hash(#[case] mutate: fn(&mut StreamDictEntry)) {
+        let base = baseline_dict();
+        let mut mutated = base.clone();
+        mutate(&mut mutated);
+
+        assert_ne!(compute_dict_hash(&base), compute_dict_hash(&mutated));
+    }
+
+    #[rstest]
+    #[case::from(|g: &mut MarkerGap| g.from_marker_seq = 99)]
+    #[case::to(|g: &mut MarkerGap| g.to_marker_seq = 99)]
+    #[case::reason(|g: &mut MarkerGap| g.reason = MarkerGapReason::WriterClosed)]
+    fn every_gap_field_affects_hash(#[case] mutate: fn(&mut MarkerGap)) {
+        let base = baseline_gap();
+        let mut mutated = base.clone();
+        mutate(&mut mutated);
+
+        assert_ne!(compute_gap_hash(&base), compute_gap_hash(&mutated));
+    }
+
+    #[rstest]
     fn marker_hash_handles_empty_advanced() {
         let empty = DataCursorSnapshot {
             marker_seq: 1,
@@ -399,66 +508,5 @@ mod tests {
             compute_marker_hash(&empty),
             compute_marker_hash(&baseline_snapshot())
         );
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
-
-        // Any cursor snapshot survives a bincode encode/decode unchanged
-        #[rstest]
-        fn prop_marker_snapshot_bincode_roundtrip(
-            marker_seq in any::<u64>(),
-            event_seq_before in any::<u64>(),
-            ts_init in any::<u64>(),
-            cursors in proptest::collection::vec((any::<u32>(), any::<u64>(), any::<u64>()), 0..8),
-        ) {
-            let cfg = bincode::config::standard();
-            let snap = DataCursorSnapshot {
-                marker_seq,
-                event_seq_before,
-                ts_init: UnixNanos::from(ts_init),
-                advanced: cursors
-                    .into_iter()
-                    .map(|(slot, hi, count)| StreamCursor {
-                        slot,
-                        ts_init_hi: UnixNanos::from(hi),
-                        count,
-                    })
-                    .collect(),
-            };
-
-            let bytes = bincode::serde::encode_to_vec(&snap, cfg).expect("encode");
-            let (decoded, _): (DataCursorSnapshot, _) =
-                bincode::serde::decode_from_slice(&bytes, cfg).expect("decode");
-            prop_assert_eq!(snap, decoded);
-        }
-
-        // Any high-fidelity marker survives a bincode encode/decode unchanged
-        #[rstest]
-        fn prop_hifi_marker_bincode_roundtrip(
-            marker_seq in any::<u64>(),
-            event_seq_before in any::<u64>(),
-            slot in any::<u32>(),
-            ts_event in any::<u64>(),
-            ts_init in any::<u64>(),
-            same_ts_ordinal in any::<u32>(),
-            fingerprint in proptest::array::uniform32(any::<u8>()),
-        ) {
-            let cfg = bincode::config::standard();
-            let marker = HiFiMarker {
-                marker_seq,
-                event_seq_before,
-                slot,
-                ts_event: UnixNanos::from(ts_event),
-                ts_init: UnixNanos::from(ts_init),
-                same_ts_ordinal,
-                record_fingerprint: fingerprint,
-            };
-
-            let bytes = bincode::serde::encode_to_vec(&marker, cfg).expect("encode");
-            let (decoded, _): (HiFiMarker, _) =
-                bincode::serde::decode_from_slice(&bytes, cfg).expect("decode");
-            prop_assert_eq!(marker, decoded);
-        }
     }
 }

@@ -760,6 +760,7 @@ fn parse_order_filled(
         false,
         identity.venue_position_id,
         Some(commission),
+        None,
     ))
 }
 
@@ -788,7 +789,7 @@ fn dispatch_order_response(
                 }
 
                 if is_bybit_ambiguous_order_error_code(error.code) {
-                    log::error!(
+                    log::warn!(
                         "Ambiguous batch order item failure at index {idx}: code={}, msg={}; awaiting reconciliation",
                         error.code,
                         error.msg,
@@ -848,7 +849,7 @@ fn dispatch_order_response(
 
     if is_batch_response {
         let order_count = pending.as_ref().map_or(0, |(cids, _, _)| cids.len());
-        log::error!(
+        log::warn!(
             "Ambiguous batch order response failure for {order_count} orders: op={}, ret_code={}, ret_msg={}; awaiting reconciliation",
             resp.op,
             resp.ret_code,
@@ -858,7 +859,7 @@ fn dispatch_order_response(
     }
 
     if is_bybit_ambiguous_order_error_code(resp.ret_code) {
-        log::error!(
+        log::warn!(
             "Ambiguous order response failure: op={}, ret_code={}, ret_msg={}; awaiting reconciliation",
             resp.op,
             resp.ret_code,

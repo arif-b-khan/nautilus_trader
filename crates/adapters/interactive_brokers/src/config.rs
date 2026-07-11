@@ -28,7 +28,14 @@ use crate::common::consts::{DEFAULT_CLIENT_ID, DEFAULT_HOST, DEFAULT_PORT};
     feature = "python",
     pyo3::pyclass(
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
-        from_py_object
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE"
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 #[derive(Default)]
@@ -64,6 +71,12 @@ impl From<MarketDataType> for ibapi::market_data::MarketDataType {
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
         subclass,
         from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 pub struct InteractiveBrokersDataClientConfig {
@@ -121,6 +134,12 @@ impl Default for InteractiveBrokersDataClientConfig {
         from_py_object
     )
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(
+        module = "nautilus_trader.adapters.interactive_brokers"
+    )
+)]
 pub struct InteractiveBrokersExecClientConfig {
     /// Host for IB Gateway/TWS.
     #[builder(default = DEFAULT_HOST.to_string())]
@@ -162,7 +181,14 @@ impl Default for InteractiveBrokersExecClientConfig {
     feature = "python",
     pyo3::pyclass(
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
-        from_py_object
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE"
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 #[derive(Default)]
@@ -185,6 +211,12 @@ pub enum SymbologyMethod {
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
         subclass,
         from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 pub struct InteractiveBrokersInstrumentProviderConfig {
@@ -216,6 +248,10 @@ pub struct InteractiveBrokersInstrumentProviderConfig {
     /// Security types to filter out.
     #[builder(default)]
     pub filter_sec_types: HashSet<String>,
+    /// Fully-qualified Python callable path for custom instrument filtering.
+    ///
+    /// Configuring this without the Python feature enabled is an error.
+    pub filter_callable: Option<String>,
     /// Path to cache file for persistent instrument caching (equivalent to pickle_path in Python).
     /// If provided, instruments will be cached to disk and loaded from cache if still valid.
     pub cache_path: Option<String>,
@@ -233,7 +269,14 @@ impl Default for InteractiveBrokersInstrumentProviderConfig {
     feature = "python",
     pyo3::pyclass(
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
-        from_py_object
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE"
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 #[derive(Default)]
@@ -259,6 +302,12 @@ pub enum TradingMode {
         module = "nautilus_trader.core.nautilus_pyo3.interactive_brokers",
         subclass,
         from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(
+        module = "nautilus_trader.adapters.interactive_brokers"
     )
 )]
 pub struct DockerizedIBGatewayConfig {

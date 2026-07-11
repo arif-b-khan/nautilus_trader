@@ -61,7 +61,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::fixed::{
     FIXED_PRECISION, FIXED_SCALAR, MAX_FLOAT_PRECISION, check_fixed_precision,
-    mantissa_exponent_to_fixed_i128, raw_scales_match,
+    mantissa_exponent_to_fixed_i128, mantissa_exponent_to_raw_checked, raw_scales_match,
 };
 #[cfg(not(feature = "high-precision"))]
 use super::fixed::{f64_to_fixed_u64, fixed_u64_to_f64};
@@ -81,9 +81,15 @@ pub type QuantityRaw = u64;
 // -----------------------------------------------------------------------------
 
 /// The maximum raw quantity integer value.
+///
+/// `QUANTITY_MAX` and `FIXED_SCALAR` are cast to `QuantityRaw` before multiplying, so the
+/// scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+/// fits within `QuantityRaw`'s range in both high-precision (u128) and standard-precision
+/// (u64) modes, so the multiplication cannot overflow.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
-pub static QUANTITY_RAW_MAX: QuantityRaw = (QUANTITY_MAX * FIXED_SCALAR) as QuantityRaw;
+pub static QUANTITY_RAW_MAX: QuantityRaw =
+    (QUANTITY_MAX as QuantityRaw) * (FIXED_SCALAR as QuantityRaw);
 
 /// The sentinel value for an unset or null quantity.
 pub const QUANTITY_UNDEF: QuantityRaw = QuantityRaw::MAX;
@@ -343,11 +349,11 @@ impl Quantity {
     ///
     /// # Panics
     ///
-    /// Panics if a correctness check fails. See [`Quantity::new_checked`] for more details.
+    /// Panics if `precision` exceeds the maximum allowed by [`check_fixed_precision`].
     #[must_use]
     pub fn zero(precision: u8) -> Self {
         check_fixed_precision(precision).expect_display(FAILED);
-        Self::new(0.0, precision)
+        Self { raw: 0, precision }
     }
 
     /// Returns `true` if the value of this instance is undefined.
@@ -513,6 +519,29 @@ impl Quantity {
         );
 
         Self { raw, precision }
+    }
+
+    /// Checked variant of [`Quantity::from_mantissa_exponent`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the precision is invalid or the resulting raw value
+    /// exceeds [`QUANTITY_RAW_MAX`].
+    pub fn from_mantissa_exponent_checked(
+        mantissa: u64,
+        exponent: i8,
+        precision: u8,
+    ) -> CorrectnessResult<Self> {
+        let raw = mantissa_exponent_to_raw_checked::<QuantityRaw>(
+            i128::from(mantissa),
+            exponent,
+            precision,
+            "Quantity::from_mantissa_exponent",
+            "QuantityRaw",
+            "Quantity",
+        )?;
+
+        Self::from_raw_checked(raw, precision)
     }
 
     /// Creates a new [`Quantity`] from a U256 amount with specified precision.
@@ -852,8 +881,7 @@ impl<'de> Deserialize<'de> for Quantity {
         D: Deserializer<'de>,
     {
         let qty_str: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
-        let qty: Self = qty_str.as_ref().into();
-        Ok(qty)
+        Self::from_str(qty_str.as_ref()).map_err(serde::de::Error::custom)
     }
 }
 
@@ -882,6 +910,17 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
+
+    #[rstest]
+    fn test_max_quantity_round_trips_through_raw() {
+        // Regression: a lossy `f64` scalar previously left `QUANTITY_RAW_MAX` below the raw
+        // produced by `new` at the maximum, causing spurious panics and overflow errors.
+        let qty = Quantity::new(QUANTITY_MAX, 0);
+
+        assert_eq!(qty.raw, QUANTITY_RAW_MAX);
+        assert!(Quantity::from_raw_checked(qty.raw, 0).is_ok());
+        assert!(qty.checked_add(Quantity::zero(0)).is_some());
+    }
 
     #[rstest]
     fn test_check_quantity_positive() {
@@ -1582,6 +1621,26 @@ mod tests {
     }
 
     #[rstest]
+    fn test_quantity_deserialize_invalid_string_returns_error() {
+        let result = serde_json::from_str::<Quantity>("\"not-a-quantity\"");
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("Error parsing"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[rstest]
+    fn test_quantity_deserialize_negative_returns_error() {
+        let result = serde_json::from_str::<Quantity>("\"-1.5\"");
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("negative"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[rstest]
     fn test_from_mantissa_exponent_exact_precision() {
         let qty = Quantity::from_mantissa_exponent(12345, -2, 2);
         assert_eq!(qty.as_f64(), 123.45);
@@ -1612,6 +1671,39 @@ mod tests {
     fn test_from_mantissa_exponent_zero() {
         let qty = Quantity::from_mantissa_exponent(0, 2, 2);
         assert_eq!(qty.as_f64(), 0.0);
+    }
+
+    #[rstest]
+    fn test_from_mantissa_exponent_checked_exact_precision() {
+        let qty = Quantity::from_mantissa_exponent_checked(12345, -2, 2).unwrap();
+        assert_eq!(qty.as_decimal(), dec!(123.45));
+    }
+
+    #[rstest]
+    fn test_from_mantissa_exponent_checked_zero_with_large_exponent() {
+        let qty = Quantity::from_mantissa_exponent_checked(0, 119, 2).unwrap();
+        assert_eq!(qty.as_decimal(), dec!(0.00));
+    }
+
+    #[rstest]
+    fn test_from_mantissa_exponent_checked_invalid_precision() {
+        #[cfg(feature = "defi")]
+        let invalid_precision = crate::defi::WEI_PRECISION + 1;
+        #[cfg(not(feature = "defi"))]
+        let invalid_precision = FIXED_PRECISION + 1;
+
+        let error = Quantity::from_mantissa_exponent_checked(1, 0, invalid_precision).unwrap_err();
+        assert!(error.to_string().contains("`precision` exceeded maximum"));
+    }
+
+    #[rstest]
+    fn test_from_mantissa_exponent_checked_overflow_returns_error() {
+        let error = Quantity::from_mantissa_exponent_checked(u64::MAX, 100, 0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Overflow in Quantity::from_mantissa_exponent")
+        );
     }
 
     #[rstest]
@@ -1839,18 +1931,17 @@ mod property_tests {
             let q_b = Quantity::new(b, precision);
             let q_c = Quantity::new(c, precision);
 
-            // Check if we can perform the operations without overflow using raw arithmetic
-            let ab_raw = q_a.raw.checked_add(q_b.raw);
-            let bc_raw = q_b.raw.checked_add(q_c.raw);
+            let expected = q_a
+                .raw
+                .checked_add(q_b.raw)
+                .and_then(|sum| sum.checked_add(q_c.raw))
+                .filter(|sum| *sum <= QUANTITY_RAW_MAX);
 
-            if let (Some(ab_raw), Some(bc_raw)) = (ab_raw, bc_raw) {
-                let ab_c_raw = ab_raw.checked_add(q_c.raw);
-                let a_bc_raw = q_a.raw.checked_add(bc_raw);
-
-                if let (Some(ab_c_raw), Some(a_bc_raw)) = (ab_c_raw, a_bc_raw) {
-                    // (a + b) + c == a + (b + c) using raw arithmetic (exact)
-                    prop_assert_eq!(ab_c_raw, a_bc_raw, "Associativity failed in raw arithmetic");
-                }
+            if let Some(expected) = expected {
+                let left = (q_a + q_b) + q_c;
+                let right = q_a + (q_b + q_c);
+                prop_assert_eq!(left.raw, expected);
+                prop_assert_eq!(right.raw, expected);
             }
         }
 
@@ -1864,12 +1955,14 @@ mod property_tests {
             let q_base = Quantity::new(base, precision);
             let q_delta = Quantity::new(delta, precision);
 
-            // Use raw arithmetic to avoid floating-point precision issues
-            if let Some(added_raw) = q_base.raw.checked_add(q_delta.raw)
-                && let Some(result_raw) = added_raw.checked_sub(q_delta.raw) {
-                    // (base + delta) - delta should equal base exactly using raw arithmetic
-                    prop_assert_eq!(result_raw, q_base.raw, "Inverse operation failed in raw arithmetic");
-                }
+            let expected = q_base
+                .raw
+                .checked_add(q_delta.raw)
+                .filter(|sum| *sum <= QUANTITY_RAW_MAX);
+
+            if expected.is_some() {
+                prop_assert_eq!((q_base + q_delta) - q_delta, q_base);
+            }
         }
 
         /// Property: checked_add agrees with raw checked_add when result is in bounds and
@@ -1946,34 +2039,6 @@ mod property_tests {
             let round_trip = parsed.to_string();
             let expected_value = format!("{integral}.{fractional_str}");
             prop_assert_eq!(round_trip, expected_value);
-        }
-
-        /// Property: Quantity with higher precision should contain more or equal information
-        #[rstest]
-        fn prop_quantity_precision_information_preservation(
-            value in quantity_value_strategy().prop_filter("Reasonable values", |&x| x < 1e6),
-            precision1 in precision_strategy_non_zero(),
-            precision2 in precision_strategy_non_zero()
-        ) {
-            // Skip cases where precisions are equal (trivial case)
-            prop_assume!(precision1 != precision2);
-
-            let _q1 = Quantity::new(value, precision1);
-            let _q2 = Quantity::new(value, precision2);
-
-            // When both quantities are created from the same value with different precisions,
-            // converting both to the lower precision should yield the same result
-            let min_precision = precision1.min(precision2);
-
-            // Round the original value to the minimum precision first
-            let scale = 10.0_f64.powi(i32::from(min_precision));
-            let rounded_value = (value * scale).round() / scale;
-
-            let q1_reduced = Quantity::new(rounded_value, min_precision);
-            let q2_reduced = Quantity::new(rounded_value, min_precision);
-
-            // They should be exactly equal when created from the same rounded value
-            prop_assert_eq!(q1_reduced.raw, q2_reduced.raw, "Precision reduction inconsistent");
         }
 
         /// Property: Quantity arithmetic should never produce invalid values

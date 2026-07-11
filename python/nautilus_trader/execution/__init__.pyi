@@ -7,9 +7,12 @@ from nautilus_trader import model
 
 __all__ = [
     "BestPriceFillModel",
+    "CappedOptionFeeModel",
     "CompetitionAwareFillModel",
     "DefaultFillModel",
     "ExecutionEngineConfig",
+    "FeeModel",
+    "FillModel",
     "FixedFeeModel",
     "LimitOrderPartialFillModel",
     "MakerTakerFeeModel",
@@ -18,9 +21,11 @@ __all__ = [
     "OrderEmulatorConfig",
     "PerContractFeeModel",
     "ProbabilisticFillModel",
+    "ProbabilityPriceFeeModel",
     "SizeAwareFillModel",
     "StaticLatencyModel",
     "ThreeTierFillModel",
+    "TieredNotionalOptionFeeModel",
     "TwoTierFillModel",
     "VolumeSensitiveFillModel",
     "calculate_reconciliation_price",
@@ -33,6 +38,15 @@ __all__ = [
 class BestPriceFillModel:
     def __init__(
         self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
+    ) -> None: ...
+
+@typing.final
+class CappedOptionFeeModel:
+    def __init__(
+        self,
+        maker_rate: decimal.Decimal | None = None,
+        taker_rate: decimal.Decimal | None = None,
+        cap_rate: decimal.Decimal | None = None,
     ) -> None: ...
 
 @typing.final
@@ -88,10 +102,44 @@ class ExecutionEngineConfig:
     @property
     def debug(self) -> bool: ...
 
+class FeeModel:
+    def __init__(self) -> None: ...
+    def get_commission(
+        self,
+        _order: typing.Any,
+        _fill_quantity: model.Quantity,
+        _fill_px: model.Price,
+        _instrument: typing.Any,
+    ) -> model.Money: ...
+    def get_commission_with_context(
+        self,
+        order: typing.Any,
+        fill_quantity: model.Quantity,
+        fill_px: model.Price,
+        instrument: typing.Any,
+        _underlying_px: model.Price | None = ...,
+    ) -> model.Money: ...
+
+class FillModel:
+    def __init__(self) -> None: ...
+    def is_limit_filled(self) -> bool: ...
+    def is_slipped(self) -> bool: ...
+    def fill_limit_inside_spread(self) -> bool: ...
+    def get_orderbook_for_fill_simulation(
+        self,
+        _instrument: typing.Any,
+        _order: typing.Any,
+        _best_bid: model.Price,
+        _best_ask: model.Price,
+    ) -> model.OrderBook | None: ...
+
 @typing.final
 class FixedFeeModel:
     def __init__(
-        self, commission: model.Money, change_commission_once: bool | None = None
+        self,
+        commission: model.Money,
+        charge_commission_once: bool | None = None,
+        change_commission_once: bool | None = None,
     ) -> None: ...
 
 @typing.final
@@ -133,6 +181,10 @@ class ProbabilisticFillModel:
     ) -> None: ...
 
 @typing.final
+class ProbabilityPriceFeeModel:
+    def __init__(self) -> None: ...
+
+@typing.final
 class SizeAwareFillModel:
     def __init__(
         self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
@@ -152,6 +204,12 @@ class StaticLatencyModel:
 class ThreeTierFillModel:
     def __init__(
         self, prob_fill_on_limit: float, prob_slippage: float, random_seed: int | None = ...
+    ) -> None: ...
+
+@typing.final
+class TieredNotionalOptionFeeModel:
+    def __init__(
+        self, maker_rate: decimal.Decimal | None = None, taker_rate: decimal.Decimal | None = None
     ) -> None: ...
 
 @typing.final

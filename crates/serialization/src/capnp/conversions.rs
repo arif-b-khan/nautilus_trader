@@ -21,7 +21,7 @@ use indexmap::IndexMap;
 use nautilus_model::{
     data::{
         FundingRateUpdate, IndexPriceUpdate, InstrumentClose, InstrumentStatus, MarkPriceUpdate,
-        QuoteTick, TradeTick,
+        OptionGreekValues, OptionGreeks, QuoteTick, TradeTick,
         bar::{Bar, BarSpecification, BarType},
         delta::OrderBookDelta,
         deltas::OrderBookDeltas,
@@ -30,10 +30,10 @@ use nautilus_model::{
     },
     enums::{
         AccountType, AggregationSource, AggressorSide, AssetClass, BarAggregation, BookAction,
-        BookType, ContingencyType, CurrencyType, InstrumentClass, InstrumentCloseType,
-        LiquiditySide, MarketStatusAction, OmsType, OptionKind, OrderSide, OrderStatus, OrderType,
-        PositionAdjustmentType, PositionSide, PriceType, RecordFlag, TimeInForce,
-        TrailingOffsetType, TriggerType,
+        BookType, ContingencyType, CurrencyType, GreeksConvention, InstrumentClass,
+        InstrumentCloseType, LiquiditySide, MarketStatusAction, OmsType, OptionKind, OrderSide,
+        OrderStatus, OrderType, PositionAdjustmentType, PositionSide, PriceType, RecordFlag,
+        TimeInForce, TrailingOffsetType, TriggerType,
     },
     events::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderDenied, OrderEmulated,
@@ -655,6 +655,22 @@ pub fn option_kind_from_capnp(value: enums_capnp::OptionKind) -> OptionKind {
     match value {
         enums_capnp::OptionKind::Call => OptionKind::Call,
         enums_capnp::OptionKind::Put => OptionKind::Put,
+    }
+}
+
+#[must_use]
+pub fn greeks_convention_to_capnp(value: GreeksConvention) -> enums_capnp::GreeksConvention {
+    match value {
+        GreeksConvention::BlackScholes => enums_capnp::GreeksConvention::BlackScholes,
+        GreeksConvention::PriceAdjusted => enums_capnp::GreeksConvention::PriceAdjusted,
+    }
+}
+
+#[must_use]
+pub fn greeks_convention_from_capnp(value: enums_capnp::GreeksConvention) -> GreeksConvention {
+    match value {
+        enums_capnp::GreeksConvention::BlackScholes => GreeksConvention::BlackScholes,
+        enums_capnp::GreeksConvention::PriceAdjusted => GreeksConvention::PriceAdjusted,
     }
 }
 
@@ -1774,6 +1790,98 @@ impl<'a> FromCapnp<'a> for FundingRateUpdate {
             rate,
             interval,
             next_funding_ns,
+            ts_event: ts_event.into(),
+            ts_init: ts_init.into(),
+        })
+    }
+}
+
+impl<'a> ToCapnp<'a> for OptionGreeks {
+    type Builder = market_capnp::option_greeks::Builder<'a>;
+
+    fn to_capnp(&self, mut builder: Self::Builder) {
+        let instrument_id_builder = builder.reborrow().init_instrument_id();
+        self.instrument_id.to_capnp(instrument_id_builder);
+
+        builder.set_convention(greeks_convention_to_capnp(self.convention));
+        builder.set_delta(self.greeks.delta);
+        builder.set_gamma(self.greeks.gamma);
+        builder.set_vega(self.greeks.vega);
+        builder.set_theta(self.greeks.theta);
+        builder.set_rho(self.greeks.rho);
+
+        if let Some(mark_iv) = self.mark_iv {
+            builder.reborrow().set_mark_iv(mark_iv);
+            builder.reborrow().set_has_mark_iv(true);
+        }
+
+        if let Some(bid_iv) = self.bid_iv {
+            builder.reborrow().set_bid_iv(bid_iv);
+            builder.reborrow().set_has_bid_iv(true);
+        }
+
+        if let Some(ask_iv) = self.ask_iv {
+            builder.reborrow().set_ask_iv(ask_iv);
+            builder.reborrow().set_has_ask_iv(true);
+        }
+
+        if let Some(underlying_price) = self.underlying_price {
+            builder.reborrow().set_underlying_price(underlying_price);
+            builder.reborrow().set_has_underlying_price(true);
+        }
+
+        if let Some(open_interest) = self.open_interest {
+            builder.reborrow().set_open_interest(open_interest);
+            builder.reborrow().set_has_open_interest(true);
+        }
+
+        let mut ts_event_builder = builder.reborrow().init_ts_event();
+        ts_event_builder.set_value(*self.ts_event);
+
+        let mut ts_init_builder = builder.reborrow().init_ts_init();
+        ts_init_builder.set_value(*self.ts_init);
+    }
+}
+
+impl<'a> FromCapnp<'a> for OptionGreeks {
+    type Reader = market_capnp::option_greeks::Reader<'a>;
+
+    fn from_capnp(reader: Self::Reader) -> Result<Self, Box<dyn Error>> {
+        let instrument_id_reader = reader.get_instrument_id()?;
+        let instrument_id = InstrumentId::from_capnp(instrument_id_reader)?;
+        let convention = greeks_convention_from_capnp(reader.get_convention()?);
+        let greeks = OptionGreekValues {
+            delta: reader.get_delta(),
+            gamma: reader.get_gamma(),
+            vega: reader.get_vega(),
+            theta: reader.get_theta(),
+            rho: reader.get_rho(),
+        };
+        let mark_iv = reader.get_has_mark_iv().then_some(reader.get_mark_iv());
+        let bid_iv = reader.get_has_bid_iv().then_some(reader.get_bid_iv());
+        let ask_iv = reader.get_has_ask_iv().then_some(reader.get_ask_iv());
+        let underlying_price = reader
+            .get_has_underlying_price()
+            .then_some(reader.get_underlying_price());
+        let open_interest = reader
+            .get_has_open_interest()
+            .then_some(reader.get_open_interest());
+
+        let ts_event_reader = reader.get_ts_event()?;
+        let ts_event = ts_event_reader.get_value();
+
+        let ts_init_reader = reader.get_ts_init()?;
+        let ts_init = ts_init_reader.get_value();
+
+        Ok(Self {
+            instrument_id,
+            convention,
+            greeks,
+            mark_iv,
+            bid_iv,
+            ask_iv,
+            underlying_price,
+            open_interest,
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
         })
@@ -3032,8 +3140,10 @@ impl<'a> ToCapnp<'a> for OrderPendingUpdate {
             venue_order_id.to_capnp(venue_order_id_builder);
         }
 
-        let account_id_builder = builder.reborrow().init_account_id();
-        self.account_id.to_capnp(account_id_builder);
+        if let Some(ref account_id) = self.account_id {
+            let account_id_builder = builder.reborrow().init_account_id();
+            account_id.to_capnp(account_id_builder);
+        }
 
         let event_id_builder = builder.reborrow().init_event_id();
         self.event_id.to_capnp(event_id_builder);
@@ -3071,8 +3181,12 @@ impl<'a> FromCapnp<'a> for OrderPendingUpdate {
             None
         };
 
-        let account_id_reader = reader.get_account_id()?;
-        let account_id = AccountId::from_capnp(account_id_reader)?;
+        let account_id = if reader.has_account_id() {
+            let account_id_reader = reader.get_account_id()?;
+            Some(AccountId::from_capnp(account_id_reader)?)
+        } else {
+            None
+        };
 
         let event_id_reader = reader.get_event_id()?;
         let event_id = nautilus_core::UUID4::from_capnp(event_id_reader)?;
@@ -3123,8 +3237,10 @@ impl<'a> ToCapnp<'a> for OrderPendingCancel {
             venue_order_id.to_capnp(venue_order_id_builder);
         }
 
-        let account_id_builder = builder.reborrow().init_account_id();
-        self.account_id.to_capnp(account_id_builder);
+        if let Some(ref account_id) = self.account_id {
+            let account_id_builder = builder.reborrow().init_account_id();
+            account_id.to_capnp(account_id_builder);
+        }
 
         let event_id_builder = builder.reborrow().init_event_id();
         self.event_id.to_capnp(event_id_builder);
@@ -3162,8 +3278,12 @@ impl<'a> FromCapnp<'a> for OrderPendingCancel {
             None
         };
 
-        let account_id_reader = reader.get_account_id()?;
-        let account_id = AccountId::from_capnp(account_id_reader)?;
+        let account_id = if reader.has_account_id() {
+            let account_id_reader = reader.get_account_id()?;
+            Some(AccountId::from_capnp(account_id_reader)?)
+        } else {
+            None
+        };
 
         let event_id_reader = reader.get_event_id()?;
         let event_id = nautilus_core::UUID4::from_capnp(event_id_reader)?;
@@ -3568,6 +3688,16 @@ impl<'a> ToCapnp<'a> for OrderFilled {
             let commission_builder = builder.reborrow().init_commission();
             commission.to_capnp(commission_builder);
         }
+
+        if let Some(info) = &self.info {
+            let mut info_builder = builder.reborrow().init_info();
+            let mut entries_builder = info_builder.reborrow().init_entries(info.len() as u32);
+            for (i, (key, value)) in info.iter().enumerate() {
+                let mut entry_builder = entries_builder.reborrow().get(i as u32);
+                entry_builder.set_key(key.as_str());
+                entry_builder.set_value(value.as_str());
+            }
+        }
     }
 }
 
@@ -3635,6 +3765,20 @@ impl<'a> FromCapnp<'a> for OrderFilled {
             None
         };
 
+        let info = if reader.has_info() {
+            let info_reader = reader.get_info()?;
+            let entries_reader = info_reader.get_entries()?;
+            let mut map = IndexMap::with_capacity(entries_reader.len() as usize);
+            for entry_reader in entries_reader {
+                let key = Ustr::from(entry_reader.get_key()?.to_str()?);
+                let value = Ustr::from(entry_reader.get_value()?.to_str()?);
+                map.insert(key, value);
+            }
+            Some(map)
+        } else {
+            None
+        };
+
         Ok(Self {
             trader_id,
             strategy_id,
@@ -3655,6 +3799,7 @@ impl<'a> FromCapnp<'a> for OrderFilled {
             reconciliation,
             position_id,
             commission,
+            info,
             causation_id: None,
         })
     }
@@ -3702,6 +3847,11 @@ impl<'a> ToCapnp<'a> for OrderInitialized {
         if let Some(price) = self.price {
             let price_builder = builder.reborrow().init_price();
             price.to_capnp(price_builder);
+        }
+
+        if let Some(activation_price) = self.activation_price {
+            let activation_price_builder = builder.reborrow().init_activation_price();
+            activation_price.to_capnp(activation_price_builder);
         }
 
         if let Some(trigger_price) = self.trigger_price {
@@ -3842,6 +3992,13 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
         let price = if reader.has_price() {
             let price_reader = reader.get_price()?;
             Some(Price::from_capnp(price_reader)?)
+        } else {
+            None
+        };
+
+        let activation_price = if reader.has_activation_price() {
+            let activation_price_reader = reader.get_activation_price()?;
+            Some(Price::from_capnp(activation_price_reader)?)
         } else {
             None
         };
@@ -3990,6 +4147,7 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             price,
+            activation_price,
             trigger_price,
             trigger_type,
             limit_offset,
@@ -4996,6 +5154,20 @@ mod tests {
         FundingRateUpdate
     );
     capnp_simple_roundtrip_test!(
+        option_greeks_capnp_roundtrip,
+        sample_option_greeks(),
+        market_capnp::option_greeks::Builder,
+        market_capnp::option_greeks::Reader,
+        OptionGreeks
+    );
+    capnp_simple_roundtrip_test!(
+        option_greeks_black_scholes_zero_optional_capnp_roundtrip,
+        sample_option_greeks_black_scholes_zero_optional(),
+        market_capnp::option_greeks::Builder,
+        market_capnp::option_greeks::Reader,
+        OptionGreeks
+    );
+    capnp_simple_roundtrip_test!(
         instrument_close_capnp_roundtrip,
         stub_instrument_close(),
         market_capnp::instrument_close::Builder,
@@ -5039,6 +5211,37 @@ mod tests {
         order_capnp::order_initialized::Builder,
         order_capnp::order_initialized::Reader
     );
+    #[rstest]
+    fn order_initialized_activation_price_capnp_roundtrip(
+        order_initialized_buy_limit: OrderInitialized,
+    ) {
+        let initialized = OrderInitialized {
+            activation_price: Some(Price::from("21000")),
+            ..order_initialized_buy_limit
+        };
+        assert_capnp_roundtrip!(
+            initialized,
+            order_capnp::order_initialized::Builder,
+            order_capnp::order_initialized::Reader,
+            OrderInitialized
+        );
+    }
+    #[rstest]
+    fn order_filled_info_capnp_roundtrip(order_filled: OrderFilled) {
+        let mut info = IndexMap::new();
+        info.insert(Ustr::from("liquidation"), Ustr::from("true"));
+        info.insert(Ustr::from("maker_order_id"), Ustr::from("ABC-123"));
+        let filled = OrderFilled {
+            info: Some(info),
+            ..order_filled
+        };
+        assert_capnp_roundtrip!(
+            filled,
+            order_capnp::order_filled::Builder,
+            order_capnp::order_filled::Reader,
+            OrderFilled
+        );
+    }
     order_fixture_roundtrip_test!(
         order_submitted_capnp_roundtrip,
         order_submitted,
@@ -5088,6 +5291,32 @@ mod tests {
         order_capnp::order_pending_cancel::Builder,
         order_capnp::order_pending_cancel::Reader
     );
+    #[rstest]
+    fn order_pending_update_none_account_capnp_roundtrip(order_pending_update: OrderPendingUpdate) {
+        let event = OrderPendingUpdate {
+            account_id: None,
+            ..order_pending_update
+        };
+        assert_capnp_roundtrip!(
+            event,
+            order_capnp::order_pending_update::Builder,
+            order_capnp::order_pending_update::Reader,
+            OrderPendingUpdate
+        );
+    }
+    #[rstest]
+    fn order_pending_cancel_none_account_capnp_roundtrip(order_pending_cancel: OrderPendingCancel) {
+        let event = OrderPendingCancel {
+            account_id: None,
+            ..order_pending_cancel
+        };
+        assert_capnp_roundtrip!(
+            event,
+            order_capnp::order_pending_cancel::Builder,
+            order_capnp::order_pending_cancel::Reader,
+            OrderPendingCancel
+        );
+    }
     order_fixture_roundtrip_test!(
         order_modify_rejected_capnp_roundtrip,
         order_modify_rejected,
@@ -5206,6 +5435,48 @@ mod tests {
             UnixNanos::from(5),
             UnixNanos::from(6),
         )
+    }
+
+    fn sample_option_greeks() -> OptionGreeks {
+        OptionGreeks {
+            instrument_id: InstrumentId::from("BTC-30JUN23-40000-C.DERIBIT"),
+            convention: GreeksConvention::PriceAdjusted,
+            greeks: OptionGreekValues {
+                delta: 0.525,
+                gamma: 0.00032,
+                vega: 12.25,
+                theta: -0.72,
+                rho: 0.18,
+            },
+            mark_iv: Some(0.52),
+            bid_iv: None,
+            ask_iv: Some(0.54),
+            underlying_price: Some(41_500.25),
+            open_interest: None,
+            ts_event: UnixNanos::from(7),
+            ts_init: UnixNanos::from(8),
+        }
+    }
+
+    fn sample_option_greeks_black_scholes_zero_optional() -> OptionGreeks {
+        OptionGreeks {
+            instrument_id: InstrumentId::from("ETH-30JUN23-2000-C.DERIBIT"),
+            convention: GreeksConvention::BlackScholes,
+            greeks: OptionGreekValues {
+                delta: 0.12,
+                gamma: 0.002,
+                vega: 8.0,
+                theta: -0.45,
+                rho: 0.06,
+            },
+            mark_iv: Some(0.0),
+            bid_iv: Some(0.0),
+            ask_iv: Some(0.0),
+            underlying_price: Some(0.0),
+            open_interest: Some(0.0),
+            ts_event: UnixNanos::from(9),
+            ts_init: UnixNanos::from(10),
+        }
     }
 
     fn sample_instrument_status_event() -> InstrumentStatus {

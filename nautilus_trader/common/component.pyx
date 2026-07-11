@@ -2258,7 +2258,7 @@ cdef class MessageBus:
         The custom name for the message bus.
     serializer : Serializer, optional
         The serializer for database operations.
-    database : nautilus_pyo3.RedisMessageBusDatabase, optional
+    database : nautilus_pyo3.RedisMessageBusBacking, optional
         The backing database for the message bus.
     config : MessageBusConfig, optional
         The configuration for the message bus.
@@ -2281,7 +2281,7 @@ cdef class MessageBus:
         UUID4 instance_id = None,
         str name = None,
         Serializer serializer = None,
-        database: nautilus_pyo3.RedisMessageBusDatabase | None = None,
+        database: nautilus_pyo3.RedisMessageBusBacking | None = None,
         config: Any | None = None,
     ) -> None:
         # Temporary fix for import error
@@ -3170,9 +3170,11 @@ cdef class Throttler:
         cdef int64_t delta_next
         while self._buffer:
             delta_next = self._delta_next()
-            msg = self._buffer.pop()
 
             if delta_next <= 0:
+                # Keep the buffer entry until the rate check passes, otherwise
+                # re-arming the timer would drop it.
+                msg = self._buffer.pop()
                 self._send_msg(msg)
             else:
                 self._set_timer(self._process)

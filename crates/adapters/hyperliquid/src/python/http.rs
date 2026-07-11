@@ -46,7 +46,8 @@ impl HyperliquidHttpClient {
     /// with Nautilus domain types. It maintains an instrument cache and handles conversions
     /// between Hyperliquid API responses and Nautilus domain models.
     #[new]
-    #[pyo3(signature = (private_key=None, vault_address=None, account_address=None, environment=HyperliquidEnvironment::Mainnet, timeout_secs=60, proxy_url=None, normalize_prices=true))]
+    #[pyo3(signature = (private_key=None, vault_address=None, account_address=None, environment=HyperliquidEnvironment::Mainnet, timeout_secs=60, proxy_url=None, normalize_prices=true, include_builder_attribution=true))]
+    #[expect(clippy::too_many_arguments)]
     fn py_new(
         private_key: Option<String>,
         vault_address: Option<String>,
@@ -55,6 +56,7 @@ impl HyperliquidHttpClient {
         timeout_secs: u64,
         proxy_url: Option<String>,
         normalize_prices: bool,
+        include_builder_attribution: bool,
     ) -> PyResult<Self> {
         let mut client = Self::with_credentials(
             private_key,
@@ -66,6 +68,7 @@ impl HyperliquidHttpClient {
         )
         .map_err(to_pyvalue_err)?;
         client.set_normalize_prices(normalize_prices);
+        client.set_include_builder_attribution(include_builder_attribution);
         Ok(client)
     }
 
@@ -75,29 +78,41 @@ impl HyperliquidHttpClient {
     ///
     /// Returns `Error.Auth` if required environment variables are not set.
     #[staticmethod]
-    #[pyo3(name = "from_env", signature = (environment=HyperliquidEnvironment::Mainnet))]
-    fn py_from_env(environment: HyperliquidEnvironment) -> PyResult<Self> {
-        Self::from_env(environment).map_err(to_pyvalue_err)
+    #[pyo3(name = "from_env", signature = (environment=HyperliquidEnvironment::Mainnet, include_builder_attribution=true))]
+    fn py_from_env(
+        environment: HyperliquidEnvironment,
+        include_builder_attribution: bool,
+    ) -> PyResult<Self> {
+        let mut client = Self::from_env(environment).map_err(to_pyvalue_err)?;
+        client.set_include_builder_attribution(include_builder_attribution);
+        Ok(client)
     }
 
     /// Creates a new `HyperliquidHttpClient` configured with explicit credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error.Auth` if the private key is invalid or cannot be parsed.
     #[staticmethod]
-    #[pyo3(name = "from_credentials", signature = (private_key, vault_address=None, environment=HyperliquidEnvironment::Mainnet, timeout_secs=60, proxy_url=None))]
+    #[pyo3(name = "from_credentials", signature = (private_key, vault_address=None, environment=HyperliquidEnvironment::Mainnet, timeout_secs=60, proxy_url=None, include_builder_attribution=true))]
     fn py_from_credentials(
         private_key: &str,
         vault_address: Option<&str>,
         environment: HyperliquidEnvironment,
         timeout_secs: u64,
         proxy_url: Option<String>,
+        include_builder_attribution: bool,
     ) -> PyResult<Self> {
-        Self::from_credentials(
+        let mut client = Self::from_credentials(
             private_key,
             vault_address,
             environment,
             timeout_secs,
             proxy_url,
         )
-        .map_err(to_pyvalue_err)
+        .map_err(to_pyvalue_err)?;
+        client.set_include_builder_attribution(include_builder_attribution);
+        Ok(client)
     }
 
     /// Caches a single instrument.
@@ -160,6 +175,25 @@ impl HyperliquidHttpClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.load_perp_meta().await.map_err(to_pyvalue_err)?;
             to_string(&meta).map_err(to_pyvalue_err)
+        })
+    }
+
+    /// Builds the `allDexsAssetCtxs` normalization map from dex name to ordered instrument IDs.
+    ///
+    /// The order of instrument IDs must match the venue universe ordering for each perp dex so
+    /// incoming `ctxs` arrays can be normalized without leaking raw positional payloads.
+    #[pyo3(name = "build_all_dex_asset_ctxs_instrument_ids")]
+    fn py_build_all_dex_asset_ctxs_instrument_ids<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mapping = client
+                .build_all_dex_asset_ctxs_instrument_ids()
+                .await
+                .map_err(to_pyvalue_err)?;
+            Ok(mapping.into_iter().collect::<HashMap<_, _>>())
         })
     }
 
@@ -246,6 +280,14 @@ impl HyperliquidHttpClient {
     /// Fetches candle data from the Hyperliquid API and converts it to Nautilus bars.
     /// Incomplete bars (where end_timestamp >= current time) are filtered out.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The instrument is not found in cache.
+    /// - The bar aggregation is unsupported by Hyperliquid.
+    /// - The API request fails.
+    /// - Parsing fails.
+    ///
     /// # References
     ///
     /// <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#candles-snapshot>
@@ -274,6 +316,11 @@ impl HyperliquidHttpClient {
     }
 
     /// Submits an order to the exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, order validation fails, serialization fails,
+    /// or the API returns an error.
     #[pyo3(name = "submit_order", signature = (
         instrument_id,
         client_order_id,
@@ -328,6 +375,11 @@ impl HyperliquidHttpClient {
     ///
     /// Can cancel either by venue order ID or client order ID.
     /// At least one ID must be provided.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, no order ID is provided,
+    /// or the API returns an error.
     #[pyo3(name = "cancel_order", signature = (
         instrument_id,
         client_order_id=None,
@@ -353,15 +405,20 @@ impl HyperliquidHttpClient {
 
     /// Modify an order on the Hyperliquid exchange.
     ///
-    /// The HL modify API requires a full replacement order spec plus the
-    /// venue order ID. The caller must provide all order fields.
+    /// The HL modify API requires a full replacement order spec plus a venue
+    /// order ID or cached CLOID target. The caller must provide all order fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the asset index is not found, no safe modify target
+    /// exists, the venue order ID is invalid, or the API returns an error.
     #[pyo3(name = "modify_order")]
     #[expect(clippy::too_many_arguments)]
     fn py_modify_order<'py>(
         &self,
         py: Python<'py>,
         instrument_id: InstrumentId,
-        venue_order_id: VenueOrderId,
+        venue_order_id: Option<VenueOrderId>,
         order_side: OrderSide,
         order_type: OrderType,
         price: Price,
@@ -396,6 +453,11 @@ impl HyperliquidHttpClient {
     }
 
     /// Submit multiple orders to the Hyperliquid exchange in a single request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, order validation fails, serialization fails,
+    /// or the API returns an error.
     #[pyo3(name = "submit_orders")]
     fn py_submit_orders<'py>(
         &self,
@@ -435,6 +497,10 @@ impl HyperliquidHttpClient {
     ///
     /// For vault tokens (starting with "vntls:") that are not in the cache, synthetic instruments
     /// will be created automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or parsing fails.
     #[pyo3(name = "request_order_status_reports")]
     fn py_request_order_status_reports<'py>(
         &self,
@@ -464,6 +530,10 @@ impl HyperliquidHttpClient {
     /// Queries `info_frontend_open_orders` and filters for the given oid so the
     /// result includes trigger metadata (trigger_px, tpsl, trailing_stop, etc.).
     /// Falls back to `info_order_status` when the order is no longer open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or parsing fails.
     #[pyo3(name = "request_order_status_report")]
     #[pyo3(signature = (venue_order_id=None, client_order_id=None))]
     fn py_request_order_status_report<'py>(
@@ -522,6 +592,12 @@ impl HyperliquidHttpClient {
     ///
     /// For vault tokens (starting with "vntls:") that are not in the cache, synthetic instruments
     /// will be created automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or parsing fails.
+    ///
+    /// Returns an error if `account_id` is not set on the client.
     #[pyo3(name = "request_fill_reports")]
     fn py_request_fill_reports<'py>(
         &self,
@@ -562,6 +638,13 @@ impl HyperliquidHttpClient {
     /// For vault tokens (starting with "vntls:") that are not in the cache,
     /// synthetic instruments will be created automatically. Spot balances whose
     /// base token has no cached instrument are skipped with a debug log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either clearinghouse request fails (when that
+    /// product is in scope) or parsing fails.
+    ///
+    /// Returns an error if `account_id` has not been set on the client.
     #[pyo3(name = "request_position_status_reports")]
     fn py_request_position_status_reports<'py>(
         &self,
@@ -589,9 +672,10 @@ impl HyperliquidHttpClient {
     /// Request account state (balances and margins) for a user.
     ///
     /// Fetches perp and spot clearinghouse state from Hyperliquid and merges them
-    /// into a single `AccountState`. USDC is taken from the perp margin summary
-    /// when present (to avoid double-counting combined `withdrawable`); non-USDC
-    /// tokens are appended from the spot balances.
+    /// into a single `AccountState`. USDC comes from the perp margin summary only
+    /// when that summary reflects non-zero collateral, margin used, or withdrawable
+    /// balance; if the summary is absent or zeroed, spot USDC is used instead. Non-USDC
+    /// tokens are always appended from the spot balances.
     ///
     /// # Errors
     ///
@@ -652,6 +736,10 @@ impl HyperliquidHttpClient {
     /// path. Balances whose base token has no matching instrument in the
     /// cache are skipped with a debug log (callers should ensure
     /// `request_instruments` has run first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `account_id` has not been set or the API request fails.
     #[pyo3(name = "request_spot_position_status_reports")]
     fn py_request_spot_position_status_reports<'py>(
         &self,
@@ -717,6 +805,11 @@ impl HyperliquidHttpClient {
     /// buys and sells on outcome instruments go through the standard order path
     /// without calling this; the action is for dual-side market making and
     /// inventory creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, the venue rejects the
+    /// action, or the response cannot be parsed.
     #[pyo3(name = "submit_split_outcome")]
     fn py_submit_split_outcome<'py>(
         &self,
@@ -740,6 +833,11 @@ impl HyperliquidHttpClient {
     /// Submits a `userOutcome` action with the `mergeOutcome` operation. Pass
     /// `amount = None` to merge the maximum mergeable balance (venue-side
     /// `null`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, the venue rejects the
+    /// action, or the response cannot be parsed.
     #[pyo3(name = "submit_merge_outcome", signature = (outcome, amount=None))]
     fn py_submit_merge_outcome<'py>(
         &self,
@@ -762,6 +860,11 @@ impl HyperliquidHttpClient {
     ///
     /// Submits a `userOutcome` action with the `mergeQuestion` operation. Pass
     /// `amount = None` to merge the maximum balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, the venue rejects the
+    /// action, or the response cannot be parsed.
     #[pyo3(name = "submit_merge_question", signature = (question, amount=None))]
     fn py_submit_merge_question<'py>(
         &self,
@@ -784,6 +887,11 @@ impl HyperliquidHttpClient {
     ///
     /// Submits a `userOutcome` action with the `negateOutcome` operation. Both
     /// outcomes must belong to the same multi-outcome `question`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credentials are missing, the venue rejects the
+    /// action, or the response cannot be parsed.
     #[pyo3(name = "submit_negate_outcome")]
     fn py_submit_negate_outcome<'py>(
         &self,

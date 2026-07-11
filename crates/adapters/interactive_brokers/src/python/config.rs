@@ -22,7 +22,7 @@ use pyo3::prelude::*;
 use crate::config::{
     DockerizedIBGatewayConfig, InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig, InteractiveBrokersInstrumentProviderConfig, MarketDataType,
-    SymbologyMethod, TradingMode,
+    TradingMode,
 };
 
 fn validate_order_id_client_slot(client_id: i32) -> PyResult<()> {
@@ -36,39 +36,7 @@ fn validate_order_id_client_slot(client_id: i32) -> PyResult<()> {
 }
 
 #[pymethods]
-impl MarketDataType {
-    #[classattr]
-    const REALTIME: Self = Self::Realtime;
-
-    #[classattr]
-    const FROZEN: Self = Self::Frozen;
-
-    #[classattr]
-    const DELAYED: Self = Self::Delayed;
-
-    #[classattr]
-    const DELAYED_FROZEN: Self = Self::DelayedFrozen;
-}
-
-#[pymethods]
-impl SymbologyMethod {
-    #[classattr]
-    const SIMPLIFIED: Self = Self::Simplified;
-
-    #[classattr]
-    const RAW: Self = Self::Raw;
-}
-
-#[pymethods]
-impl TradingMode {
-    #[classattr]
-    const PAPER: Self = Self::Paper;
-
-    #[classattr]
-    const LIVE: Self = Self::Live;
-}
-
-#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl InteractiveBrokersDataClientConfig {
     /// Creates a new `InteractiveBrokersDataClientConfig` instance.
     #[new]
@@ -191,6 +159,7 @@ impl InteractiveBrokersDataClientConfig {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl InteractiveBrokersExecClientConfig {
     /// Creates a new `InteractiveBrokersExecClientConfig` instance.
     #[new]
@@ -299,10 +268,11 @@ impl InteractiveBrokersExecClientConfig {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl InteractiveBrokersInstrumentProviderConfig {
     /// Creates a new `InteractiveBrokersInstrumentProviderConfig` instance.
     #[new]
-    #[pyo3(signature = (symbology_method=None, load_ids=None, load_contracts=None, min_expiry_days=None, max_expiry_days=None, build_options_chain=None, build_futures_chain=None, cache_validity_days=None, convert_exchange_to_mic_venue=None, symbol_to_mic_venue=None, filter_sec_types=None, cache_path=None))]
+    #[pyo3(signature = (symbology_method=None, load_ids=None, load_contracts=None, min_expiry_days=None, max_expiry_days=None, build_options_chain=None, build_futures_chain=None, cache_validity_days=None, convert_exchange_to_mic_venue=None, symbol_to_mic_venue=None, filter_sec_types=None, filter_callable=None, cache_path=None))]
     #[allow(clippy::too_many_arguments)]
     fn py_new(
         py: Python<'_>,
@@ -317,6 +287,7 @@ impl InteractiveBrokersInstrumentProviderConfig {
         convert_exchange_to_mic_venue: Option<bool>,
         symbol_to_mic_venue: Option<std::collections::HashMap<String, String>>,
         filter_sec_types: Option<std::collections::HashSet<String>>,
+        filter_callable: Option<String>,
         cache_path: Option<String>,
     ) -> PyResult<Self> {
         Ok(Self {
@@ -335,6 +306,7 @@ impl InteractiveBrokersInstrumentProviderConfig {
             convert_exchange_to_mic_venue: convert_exchange_to_mic_venue.unwrap_or(false),
             symbol_to_mic_venue: symbol_to_mic_venue.unwrap_or_default(),
             filter_sec_types: filter_sec_types.unwrap_or_default(),
+            filter_callable,
             cache_path,
         })
     }
@@ -413,6 +385,12 @@ impl InteractiveBrokersInstrumentProviderConfig {
         self.filter_sec_types.iter().cloned().collect()
     }
 
+    /// Returns the custom instrument filter callable path.
+    #[getter]
+    fn filter_callable(&self) -> Option<String> {
+        self.filter_callable.clone()
+    }
+
     /// Returns the cache path for persistent instrument caching.
     #[getter]
     fn cache_path(&self) -> Option<String> {
@@ -427,6 +405,7 @@ impl InteractiveBrokersInstrumentProviderConfig {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DockerizedIBGatewayConfig {
     /// Creates a new `DockerizedIBGatewayConfig` instance.
     #[new]

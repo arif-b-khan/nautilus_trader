@@ -223,12 +223,12 @@ impl MarginAccount {
     fn py_calculate_pnls(
         &self,
         instrument: Py<PyAny>,
-        fill: OrderFilled,
+        fill: &OrderFilled,
         position: Option<Position>,
         py: Python,
     ) -> PyResult<Vec<Money>> {
         let instrument = pyobject_to_instrument_any(py, instrument)?;
-        Account::calculate_pnls(self, &instrument, &fill, position).map_err(to_pyvalue_err)
+        Account::calculate_pnls(self, &instrument, fill, position).map_err(to_pyvalue_err)
     }
 
     fn __repr__(&self) -> String {
@@ -307,8 +307,8 @@ impl MarginAccount {
 
     /// Returns the initial margin amount for the specified instrument.
     #[pyo3(name = "initial_margin")]
-    fn py_initial_margin(&self, instrument_id: InstrumentId) -> Money {
-        self.initial_margin(instrument_id)
+    fn py_initial_margin(&self, instrument_id: InstrumentId) -> Option<Money> {
+        self.margin(&instrument_id).map(|margin| margin.initial)
     }
 
     /// Updates the maintenance margin for the specified instrument.
@@ -323,8 +323,8 @@ impl MarginAccount {
 
     /// Returns the maintenance margin amount for the specified instrument.
     #[pyo3(name = "maintenance_margin")]
-    fn py_maintenance_margin(&self, instrument_id: InstrumentId) -> Money {
-        self.maintenance_margin(instrument_id)
+    fn py_maintenance_margin(&self, instrument_id: InstrumentId) -> Option<Money> {
+        self.margin(&instrument_id).map(|margin| margin.maintenance)
     }
 
     #[pyo3(name = "calculate_initial_margin")]
@@ -332,6 +332,11 @@ impl MarginAccount {
     /// Calculates the initial margin amount for the specified instrument and quantity.
     ///
     /// Delegates to the configured `MarginModel`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if leverage is not positive, or if the result cannot be represented
+    /// as `Money`.
     pub fn py_calculate_initial_margin(
         &mut self,
         instrument: Py<PyAny>,
@@ -402,6 +407,10 @@ impl MarginAccount {
     /// Calculates the maintenance margin amount for the specified instrument and quantity.
     ///
     /// Delegates to the configured `MarginModel`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the result cannot be represented as `Money`.
     #[pyo3(name = "calculate_maintenance_margin")]
     #[pyo3(signature = (instrument, quantity, price, use_quote_for_inverse=None))]
     pub fn py_calculate_maintenance_margin(

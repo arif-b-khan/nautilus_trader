@@ -223,7 +223,10 @@ pub enum TardisExchange {
     Kraken,
     Kucoin,
     KucoinFutures,
+    Lighter,
     Mango,
+    Mexc,
+    MexcFutures,
     Okcoin,
     Okex,
     OkexFutures,
@@ -299,7 +302,9 @@ impl TardisExchange {
             "HYPERLIQUID" => vec![Self::Hyperliquid],
             "KRAKEN" => vec![Self::Kraken],
             "KUCOIN" => vec![Self::Kucoin, Self::KucoinFutures],
+            "LIGHTER" => vec![Self::Lighter],
             "MANGO" => vec![Self::Mango],
+            "MEXC" => vec![Self::Mexc, Self::MexcFutures],
             "OKCOIN" => vec![Self::Okcoin],
             "OKEX" => vec![
                 Self::Okex,
@@ -366,7 +371,10 @@ impl TardisExchange {
             Self::Kraken => "KRAKEN",
             Self::Kucoin => "KUCOIN",
             Self::KucoinFutures => "KUCOIN",
+            Self::Lighter => "LIGHTER",
             Self::Mango => "MANGO",
+            Self::Mexc => "MEXC",
+            Self::MexcFutures => "MEXC",
             Self::Okcoin => "OKCOIN",
             Self::Okex => "OKEX",
             Self::OkexFutures => "OKEX",
@@ -408,6 +416,11 @@ mod tests {
 
     #[rstest]
     fn test_venue_to_exchange_mapping_bidirectional() {
+        assert_eq!(
+            TardisExchange::from_venue_str("MEXC"),
+            vec![TardisExchange::Mexc, TardisExchange::MexcFutures]
+        );
+
         let test_venues = [
             "BINANCE",
             "BITMEX",
@@ -428,9 +441,11 @@ mod tests {
             "UPBIT",
             "WOO_X",
             "HYPERLIQUID",
+            "LIGHTER",
             "CRYPTO_COM",
             "DYDX",
             "HITBTC",
+            "MEXC",
         ];
 
         for venue_str in test_venues {

@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use nautilus_core::{
     UUID4, UnixNanos,
-    python::{IntoPyObjectNautilusExt, to_pyvalue_err},
+    python::{IntoPyObjectNautilusExt, clone_py_object, to_pyvalue_err},
 };
 use pyo3::{
     IntoPyObjectExt,
@@ -57,8 +57,11 @@ impl From<TimeEventHandler> for TimeEventHandler_Py {
         Self {
             event: value.event,
             callback: match value.callback {
-                #[cfg(feature = "python")]
-                TimeEventCallback::Python(callback) => callback,
+                TimeEventCallback::Python(callback) => {
+                    // `TimeEventHandler_Py` is a PyO3 v2 wrapper; legacy capsule
+                    // callbacks use `TimeEventHandler_API` instead.
+                    clone_py_object(callback.callback())
+                }
                 TimeEventCallback::Rust(_) | TimeEventCallback::RustLocal(_) => {
                     panic!("Python time event handler is not supported for Rust callbacks")
                 }
@@ -232,7 +235,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         timer.cancel();
-        wait_until(|| timer.is_expired(), Duration::from_secs(2));
+        assert!(timer.is_expired(), "Timer should be expired after cancel");
         assert!(timer.next_time_ns() > next_time_ns);
     }
 

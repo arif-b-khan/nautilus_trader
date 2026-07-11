@@ -96,6 +96,9 @@ cdef extern from "../includes/model.h":
     # The minimum valid quantity value that can be represented.
     const double QUANTITY_MIN # = 0.0
 
+    # Protocol-fee denominator for basis-point fee shares.
+    const uint32_t PROTOCOL_FEE_BASIS_POINTS_DENOMINATOR # = 10000
+
     # Minimum valid tick value for Uniswap V3 pools.
     const int32_t PoolTick_MIN_TICK # = -887272
 
@@ -1083,43 +1086,48 @@ cdef extern from "../includes/model.h":
     #
     # # Safety
     #
-    # This value is computed at compile time from `MONEY_MAX` * `FIXED_SCALAR`.
-    # The multiplication is guaranteed not to overflow because `MONEY_MAX` and `FIXED_SCALAR`
-    # are chosen such that their product fits within `MoneyRaw`'s range in both
-    # high-precision (i128) and standard-precision (i64) modes.
+    # `MONEY_MAX` and `FIXED_SCALAR` are cast to `MoneyRaw` before multiplying, so the
+    # scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+    # fits within `MoneyRaw`'s range in both high-precision (i128) and standard-precision
+    # (i64) modes, so the multiplication cannot overflow.
     extern const MoneyRaw MONEY_RAW_MAX;
 
     # The minimum raw money integer value.
     #
     # # Safety
     #
-    # This value is computed at compile time from `MONEY_MIN` * `FIXED_SCALAR`.
-    # The multiplication is guaranteed not to overflow because `MONEY_MIN` and `FIXED_SCALAR`
-    # are chosen such that their product fits within `MoneyRaw`'s range in both
-    # high-precision (i128) and standard-precision (i64) modes.
+    # `MONEY_MIN` and `FIXED_SCALAR` are cast to `MoneyRaw` before multiplying, so the
+    # scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+    # fits within `MoneyRaw`'s range in both high-precision (i128) and standard-precision
+    # (i64) modes, so the multiplication cannot overflow.
     extern const MoneyRaw MONEY_RAW_MIN;
 
     # The maximum raw price integer value.
     #
     # # Safety
     #
-    # This value is computed at compile time from `PRICE_MAX` * `FIXED_SCALAR`.
-    # The multiplication is guaranteed not to overflow because `PRICE_MAX` and `FIXED_SCALAR`
-    # are chosen such that their product fits within `PriceRaw`'s range in both
-    # high-precision (i128) and standard-precision (i64) modes.
+    # `PRICE_MAX` and `FIXED_SCALAR` are cast to `PriceRaw` before multiplying, so the
+    # scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+    # fits within `PriceRaw`'s range in both high-precision (i128) and standard-precision
+    # (i64) modes, so the multiplication cannot overflow.
     extern const PriceRaw PRICE_RAW_MAX;
 
     # The minimum raw price integer value.
     #
     # # Safety
     #
-    # This value is computed at compile time from `PRICE_MIN` * `FIXED_SCALAR`.
-    # The multiplication is guaranteed not to overflow because `PRICE_MIN` and `FIXED_SCALAR`
-    # are chosen such that their product fits within `PriceRaw`'s range in both
-    # high-precision (i128) and standard-precision (i64) modes.
+    # `PRICE_MIN` and `FIXED_SCALAR` are cast to `PriceRaw` before multiplying, so the
+    # scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+    # fits within `PriceRaw`'s range in both high-precision (i128) and standard-precision
+    # (i64) modes, so the multiplication cannot overflow.
     extern const PriceRaw PRICE_RAW_MIN;
 
     # The maximum raw quantity integer value.
+    #
+    # `QUANTITY_MAX` and `FIXED_SCALAR` are cast to `QuantityRaw` before multiplying, so the
+    # scaling uses exact integer arithmetic rather than a lossy `f64` product. The result
+    # fits within `QuantityRaw`'s range in both high-precision (u128) and standard-precision
+    # (u64) modes, so the multiplication cannot overflow.
     extern const QuantityRaw QUANTITY_RAW_MAX;
 
     # Clones a data instance.
@@ -2083,10 +2091,10 @@ cdef extern from "../includes/model.h":
     #
     # # Parameters
     #
-    # * `book` - The order book to convert.
-    # * `sequence` - The message sequence number for the snapshot.
-    # * `ts_event` - UNIX timestamp (nanoseconds) when the book event occurred.
-    # * `ts_init` - UNIX timestamp (nanoseconds) when the instance was created.
+    # - `book` - The order book to convert.
+    # - `sequence` - The message sequence number for the snapshot.
+    # - `ts_event` - UNIX timestamp (nanoseconds) when the book event occurred.
+    # - `ts_init` - UNIX timestamp (nanoseconds) when the instance was created.
     #
     # # Returns
     #

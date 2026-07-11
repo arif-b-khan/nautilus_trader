@@ -82,7 +82,8 @@ use crate::{
         models::OKXInstrument,
         parse::{
             okx_status_to_market_action, parse_account_state, parse_instrument_any,
-            parse_millisecond_timestamp, parse_position_status_report, parse_price, parse_quantity,
+            parse_instrument_id, parse_millisecond_timestamp, parse_position_status_report,
+            parse_price, parse_quantity,
         },
     },
     http::models::{OKXAccount, OKXPosition, OKXSpreadOrder},
@@ -342,6 +343,12 @@ impl OKXWebSocketClient {
         .map_err(to_pyvalue_err)
     }
 
+    /// Creates a new `OKXWebSocketClient` instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credential values cannot be loaded or if the
+    /// client fails to initialize.
     #[staticmethod]
     #[pyo3(name = "with_credentials")]
     #[pyo3(signature = (url=None, api_key=None, api_secret=None, api_passphrase=None, account_id=None, heartbeat=None, auth_timeout_secs=None, proxy_url=None))]
@@ -370,12 +377,19 @@ impl OKXWebSocketClient {
         .map_err(to_pyvalue_err)
     }
 
+    /// Creates a new authenticated `OKXWebSocketClient` using environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required environment variables are missing or if
+    /// the client fails to initialize.
     #[staticmethod]
     #[pyo3(name = "from_env")]
     fn py_from_env() -> PyResult<Self> {
         Self::from_env().map_err(to_pyvalue_err)
     }
 
+    /// Returns the websocket url being used by the client.
     #[getter]
     #[pyo3(name = "url")]
     #[must_use]
@@ -383,6 +397,7 @@ impl OKXWebSocketClient {
         self.url()
     }
 
+    /// Returns the public API key being used by the client.
     #[getter]
     #[pyo3(name = "api_key")]
     #[must_use]
@@ -390,6 +405,7 @@ impl OKXWebSocketClient {
         self.api_key()
     }
 
+    /// Returns a masked version of the API key for logging purposes.
     #[getter]
     #[pyo3(name = "api_key_masked")]
     #[must_use]
@@ -397,21 +413,25 @@ impl OKXWebSocketClient {
         self.api_key_masked()
     }
 
+    /// Returns a value indicating whether the client is active.
     #[pyo3(name = "is_active")]
     fn py_is_active(&mut self) -> bool {
         self.is_active()
     }
 
+    /// Returns a value indicating whether the client is closed.
     #[pyo3(name = "is_closed")]
     fn py_is_closed(&mut self) -> bool {
         self.is_closed()
     }
 
+    /// Cancel all pending WebSocket requests.
     #[pyo3(name = "cancel_all_requests")]
     pub fn py_cancel_all_requests(&self) {
         self.cancel_all_requests();
     }
 
+    /// Get active subscriptions for a specific instrument.
     #[pyo3(name = "get_subscriptions")]
     fn py_get_subscriptions(&self, instrument_id: InstrumentId) -> Vec<String> {
         let channels = self.get_subscriptions(instrument_id);
@@ -443,6 +463,11 @@ impl OKXWebSocketClient {
         self.vip_level()
     }
 
+    /// Connect to the OKX WebSocket server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection process fails.
     #[pyo3(name = "connect")]
     #[expect(clippy::needless_pass_by_value)]
     fn py_connect<'py>(
@@ -621,6 +646,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Wait until the WebSocket connection is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection times out.
     #[pyo3(name = "wait_until_active")]
     fn py_wait_until_active<'py>(
         &self,
@@ -638,18 +668,35 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Closes the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if disconnecting the websocket or cleaning up the
+    /// client fails.
     #[pyo3(name = "close")]
     fn py_close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let mut client = self.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Err(e) = client.close().await {
-                log::error!("Error on close: {e}");
+                log::warn!("Error on close: {e}");
             }
             Ok(())
         })
     }
 
+    /// Subscribes to instrument updates for a specific instrument type.
+    ///
+    /// Provides updates when instrument specifications change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-instruments-channel>.
     #[pyo3(name = "subscribe_instruments")]
     fn py_subscribe_instruments<'py>(
         &self,
@@ -666,6 +713,19 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to instrument updates for a specific instrument.
+    ///
+    /// Since OKX doesn't support subscribing to individual instruments via `instId`,
+    /// this method subscribes to the entire instrument type. OKX handles duplicate
+    /// subscriptions gracefully and pushes a fresh snapshot on each subscribe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-instruments-channel>.
     #[pyo3(name = "subscribe_instrument")]
     fn py_subscribe_instrument<'py>(
         &self,
@@ -682,6 +742,14 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to order book data for an instrument.
+    ///
+    /// This is a convenience method that calls `Self.subscribe_book_with_depth` with depth 0,
+    /// which automatically selects the appropriate channel based on VIP level.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_book")]
     fn py_subscribe_book<'py>(
         &self,
@@ -698,6 +766,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to 50-level tick-by-tick order book data for an instrument.
+    ///
+    /// Provides real-time updates whenever order book changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-50-depth-tbt-channel>.
     #[pyo3(name = "subscribe_book50_l2_tbt")]
     fn py_subscribe_book50_l2_tbt<'py>(
         &self,
@@ -714,6 +793,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to tick-by-tick full depth (400 levels) order book data for an instrument.
+    ///
+    /// Provides real-time updates with all depth levels whenever order book changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-400-depth-tbt-channel>.
     #[pyo3(name = "subscribe_book_l2_tbt")]
     fn py_subscribe_book_l2_tbt<'py>(
         &self,
@@ -730,6 +820,19 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to order book data with automatic channel selection based on VIP level and depth.
+    ///
+    /// Selects the optimal channel based on user's VIP tier and requested depth:
+    /// - depth 50: Requires VIP4+, subscribes to `books50-l2-tbt`
+    /// - depth 0 or 400:
+    ///   - VIP5+: subscribes to `books-l2-tbt` (400 depth, fastest)
+    ///   - Below VIP5: subscribes to `books` (standard depth)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Subscription request fails
+    /// - depth is 50 but VIP level is below 4
     #[pyo3(name = "subscribe_book_with_depth")]
     fn py_subscribe_book_with_depth<'py>(
         &self,
@@ -747,6 +850,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to 5-level order book snapshot data for an instrument.
+    ///
+    /// Updates every 100ms when there are changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-5-depth-channel>.
     #[pyo3(name = "subscribe_book_depth5")]
     fn py_subscribe_book_depth5<'py>(
         &self,
@@ -763,6 +877,18 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to best bid/ask quote data for an instrument.
+    ///
+    /// Provides tick-by-tick updates of the best bid and ask prices using the bbo-tbt channel.
+    /// Supports all instrument types: SPOT, MARGIN, SWAP, FUTURES, OPTION.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-best-bid-offer-channel>.
     #[pyo3(name = "subscribe_quotes")]
     fn py_subscribe_quotes<'py>(
         &self,
@@ -779,6 +905,19 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to trade data for an instrument.
+    ///
+    /// When `aggregated` is `false`, subscribes to the `trades` channel (per-match updates).
+    /// When `aggregated` is `true`, subscribes to the `trades-all` channel (aggregated updates).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-trades-channel>.
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-all-trades-channel>.
     #[pyo3(name = "subscribe_trades")]
     fn py_subscribe_trades<'py>(
         &self,
@@ -796,6 +935,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to candlestick/bar data for an instrument.
+    ///
+    /// Supports various time intervals from 1s to 3M.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-candlesticks-channel>.
     #[pyo3(name = "subscribe_bars")]
     fn py_subscribe_bars<'py>(
         &self,
@@ -812,6 +962,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from full order book data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_book")]
     fn py_unsubscribe_book<'py>(
         &self,
@@ -828,6 +983,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from 5-level order book snapshot data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_book_depth5")]
     fn py_unsubscribe_book_depth5<'py>(
         &self,
@@ -844,6 +1004,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from 50-level tick-by-tick order book data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_book50_l2_tbt")]
     fn py_unsubscribe_book50_l2_tbt<'py>(
         &self,
@@ -860,6 +1025,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from tick-by-tick full depth order book data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_book_l2_tbt")]
     fn py_unsubscribe_book_l2_tbt<'py>(
         &self,
@@ -876,6 +1046,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from best bid/ask quote data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_quotes")]
     fn py_unsubscribe_quotes<'py>(
         &self,
@@ -892,6 +1067,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from trade data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_trades")]
     fn py_unsubscribe_trades<'py>(
         &self,
@@ -909,6 +1089,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from candlestick/bar data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_bars")]
     fn py_unsubscribe_bars<'py>(
         &self,
@@ -925,6 +1110,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to 24hr rolling ticker data for an instrument.
+    ///
+    /// Updates every 100ms with trading statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-tickers-channel>.
     #[pyo3(name = "subscribe_ticker")]
     fn py_subscribe_ticker<'py>(
         &self,
@@ -941,6 +1137,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from 24hr rolling ticker data for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_ticker")]
     fn py_unsubscribe_ticker<'py>(
         &self,
@@ -957,6 +1158,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to mark price data for derivatives instruments.
+    ///
+    /// Updates every 200ms for perpetual swaps, or at settlement for futures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-mark-price-channel>.
     #[pyo3(name = "subscribe_mark_prices")]
     fn py_subscribe_mark_prices<'py>(
         &self,
@@ -973,6 +1185,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from mark price data for a derivatives instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_mark_prices")]
     fn py_unsubscribe_mark_prices<'py>(
         &self,
@@ -989,6 +1206,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to index price data for an instrument.
+    ///
+    /// Updates every second with the underlying index price.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-index-tickers-channel>.
     #[pyo3(name = "subscribe_index_prices")]
     fn py_subscribe_index_prices<'py>(
         &self,
@@ -1005,6 +1233,18 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from index price data for the base pair derived from
+    /// `instrument_id`.
+    ///
+    /// Refcounting is handled internally so any caller (Rust data client,
+    /// Python wrapper, etc.) can pair every `subscribe_index_prices` with
+    /// exactly one `unsubscribe_index_prices`. The OKX `index-tickers`
+    /// channel is keyed by base pair (e.g. `BTC-USDT`), so the venue
+    /// unsubscribe only fires when the last subscriber for that pair drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_index_prices")]
     fn py_unsubscribe_index_prices<'py>(
         &self,
@@ -1021,11 +1261,15 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Adds an instrument to the option greeks subscription filter, emitting both
+    /// Black-Scholes and price-adjusted greeks.
     #[pyo3(name = "add_option_greeks_sub")]
     fn py_add_option_greeks_sub(&self, instrument_id: InstrumentId) {
         self.add_option_greeks_sub(instrument_id);
     }
 
+    /// Adds an instrument to the option greeks subscription filter with an explicit
+    /// set of greeks conventions to emit. An empty set is treated as "emit both".
     #[pyo3(name = "add_option_greeks_sub_with_conventions")]
     fn py_add_option_greeks_sub_with_conventions(
         &self,
@@ -1038,11 +1282,24 @@ impl OKXWebSocketClient {
         );
     }
 
+    /// Removes an instrument from the option greeks subscription filter.
     #[pyo3(name = "remove_option_greeks_sub")]
     fn py_remove_option_greeks_sub(&self, instrument_id: InstrumentId) {
         self.remove_option_greeks_sub(&instrument_id);
     }
 
+    /// Subscribes to option summary data for an instrument family.
+    ///
+    /// Streams greeks (delta, gamma, vega, theta), implied volatility, and other
+    /// option metrics for all instruments in the specified family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-option-summary-channel>.
     #[pyo3(name = "subscribe_option_summary")]
     fn py_subscribe_option_summary<'py>(
         &self,
@@ -1060,6 +1317,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from option summary data for an instrument family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_option_summary")]
     fn py_unsubscribe_option_summary<'py>(
         &self,
@@ -1077,6 +1339,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to funding rate data for perpetual swap instruments.
+    ///
+    /// Updates when funding rate changes or at funding intervals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-funding-rate-channel>.
     #[pyo3(name = "subscribe_funding_rates")]
     fn py_subscribe_funding_rates<'py>(
         &self,
@@ -1093,6 +1366,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribe from funding rate data for a perpetual swap instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_funding_rates")]
     fn py_unsubscribe_funding_rates<'py>(
         &self,
@@ -1109,6 +1387,15 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to event contract market updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#public-data-websocket-event-contract-markets-channel>.
     #[pyo3(name = "subscribe_event_contract_markets")]
     fn py_subscribe_event_contract_markets<'py>(
         &self,
@@ -1124,6 +1411,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from event contract market updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_event_contract_markets")]
     fn py_unsubscribe_event_contract_markets<'py>(
         &self,
@@ -1139,6 +1431,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to order updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_orders")]
     fn py_subscribe_orders<'py>(
         &self,
@@ -1155,6 +1452,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from order updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_orders")]
     fn py_unsubscribe_orders<'py>(
         &self,
@@ -1171,6 +1473,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to Nitro spread order updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_spread_orders")]
     fn py_subscribe_spread_orders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1183,6 +1490,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from Nitro spread order updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_spread_orders")]
     fn py_unsubscribe_spread_orders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1195,6 +1507,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to algo order updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_orders_algo")]
     fn py_subscribe_orders_algo<'py>(
         &self,
@@ -1211,6 +1528,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from algo order updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_orders_algo")]
     fn py_unsubscribe_orders_algo<'py>(
         &self,
@@ -1227,6 +1549,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to advance algo order updates (trailing stops, iceberg, twap).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_algo_advance")]
     fn py_subscribe_algo_advance<'py>(
         &self,
@@ -1243,6 +1570,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from advance algo order updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_algo_advance")]
     fn py_unsubscribe_algo_advance<'py>(
         &self,
@@ -1259,6 +1591,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to fill updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_fills")]
     fn py_subscribe_fills<'py>(
         &self,
@@ -1275,6 +1612,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from fill updates for the given instrument type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_fills")]
     fn py_unsubscribe_fills<'py>(
         &self,
@@ -1291,6 +1633,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Subscribes to account balance updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "subscribe_account")]
     fn py_subscribe_account<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1303,6 +1650,11 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Unsubscribes from account balance updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     #[pyo3(name = "unsubscribe_account")]
     fn py_unsubscribe_account<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1315,6 +1667,17 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Submits an order, automatically routing conditional orders to the algo endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the order parameters are invalid or if the request
+    /// cannot be sent to the websocket client.
+    ///
+    /// # References
+    ///
+    /// - Regular orders: <https://www.okx.com/docs-v5/en/#order-book-trading-trade-ws-place-order>
+    /// - Algo orders: <https://www.okx.com/docs-v5/en/#order-book-trading-algo-trading-post-place-algo-order>
     #[pyo3(name = "submit_order")]
     #[pyo3(signature = (
         trader_id,
@@ -1398,6 +1761,16 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Cancels an existing order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cancel parameters are invalid or if the
+    /// cancellation request fails to send.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-trade-ws-cancel-order>.
     #[pyo3(name = "cancel_order", signature = (
         trader_id,
         strategy_id,
@@ -1430,6 +1803,21 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Place a new order via WebSocket.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-websocket-place-order>
+    /// Modifies an existing order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the amend parameters are invalid or if the
+    /// websocket request fails to send.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-trade-ws-amend-order>.
     #[pyo3(name = "modify_order")]
     #[pyo3(signature = (
         trader_id,
@@ -1479,6 +1867,12 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Submits multiple orders.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any batch order parameters are invalid or if the
+    /// batch request fails to send.
     #[pyo3(name = "batch_submit_orders")]
     fn py_batch_submit_orders<'py>(
         &self,
@@ -1533,7 +1927,18 @@ impl OKXWebSocketClient {
         })
     }
 
-    /// Cancels multiple orders via WebSocket.
+    /// Cancels multiple orders.
+    ///
+    /// Supports up to 20 orders per batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cancel parameters are invalid or if the batch
+    /// request fails to send.
+    ///
+    /// # References
+    ///
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-websocket-batch-cancel-orders>
     #[pyo3(name = "batch_cancel_orders")]
     fn py_batch_cancel_orders<'py>(
         &self,
@@ -1561,6 +1966,12 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Modifies multiple orders.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if amend parameters are invalid or if the batch request
+    /// fails to send.
     #[pyo3(name = "batch_modify_orders")]
     fn py_batch_modify_orders<'py>(
         &self,
@@ -1626,6 +2037,15 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Mass cancels all orders for a given instrument via WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if instrument metadata cannot be resolved or if the
+    /// cancel request fails to send.
+    ///
+    /// # References
+    /// <https://www.okx.com/docs-v5/en/#order-book-trading-websocket-mass-cancel-order>
     #[pyo3(name = "mass_cancel_orders")]
     fn py_mass_cancel_orders<'py>(
         &self,
@@ -1642,6 +2062,9 @@ impl OKXWebSocketClient {
         })
     }
 
+    /// Caches multiple instruments.
+    ///
+    /// Any existing instruments with the same symbols will be replaced.
     #[pyo3(name = "cache_instruments")]
     fn py_cache_instruments(&self, py: Python<'_>, instruments: Vec<Py<PyAny>>) -> PyResult<()> {
         let instruments: Result<Vec<_>, _> = instruments
@@ -1652,12 +2075,18 @@ impl OKXWebSocketClient {
         Ok(())
     }
 
+    /// Caches a single instrument.
+    ///
+    /// Any existing instrument with the same symbol will be replaced.
     #[pyo3(name = "cache_instrument")]
     fn py_cache_instrument(&self, py: Python<'_>, instrument: Py<PyAny>) -> PyResult<()> {
         self.cache_instrument(pyobject_to_instrument_any(py, instrument)?);
         Ok(())
     }
 
+    /// Caches multiple instIdCode mappings for instruments.
+    ///
+    /// This is typically called after loading instruments from the HTTP API.
     #[pyo3(name = "cache_inst_id_codes")]
     fn py_cache_inst_id_codes(&self, mappings: Vec<(String, u64)>) {
         let ustr_mappings = mappings
@@ -1911,7 +2340,7 @@ fn handle_instruments(
         let status_action = okx_status_to_market_action(okx_inst.state);
         let is_live = matches!(okx_inst.state, OKXInstrumentStatus::Live);
 
-        if let Ok(Some(inst_any)) = parse_instrument_any(
+        match parse_instrument_any(
             &okx_inst,
             margin_init,
             margin_maint,
@@ -1919,23 +2348,60 @@ fn handle_instruments(
             taker_fee,
             ts_init,
         ) {
-            let instrument_id = inst_any.id();
-            instruments_by_symbol.insert(inst_any.symbol().inner(), inst_any.clone());
-            call_python_with_data(call_soon, callback, |py| {
-                instrument_any_to_pyobject(py, inst_any)
-            });
-            let status = InstrumentStatus::new(
-                instrument_id,
-                status_action,
-                ts_init,
-                ts_init,
-                None,
-                None,
-                Some(is_live),
-                None,
-                None,
-            );
-            call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
+            Ok(Some(inst_any)) => {
+                let instrument_id = inst_any.id();
+                instruments_by_symbol.insert(inst_any.symbol().inner(), inst_any.clone());
+                call_python_with_data(call_soon, callback, |py| {
+                    instrument_any_to_pyobject(py, inst_any)
+                });
+                let status = InstrumentStatus::new(
+                    instrument_id,
+                    status_action,
+                    ts_init,
+                    ts_init,
+                    None,
+                    None,
+                    Some(is_live),
+                    None,
+                    None,
+                );
+                call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
+            }
+            Ok(None) => {
+                let instrument_id = instruments_by_symbol
+                    .get(&inst_key)
+                    .map_or_else(|| parse_instrument_id(inst_key), |i| i.id());
+                let status = InstrumentStatus::new(
+                    instrument_id,
+                    status_action,
+                    ts_init,
+                    ts_init,
+                    None,
+                    None,
+                    Some(is_live),
+                    None,
+                    None,
+                );
+                call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
+            }
+            Err(e) => {
+                log::warn!("Failed to parse instrument {}: {e}", okx_inst.inst_id);
+                let instrument_id = instruments_by_symbol
+                    .get(&inst_key)
+                    .map_or_else(|| parse_instrument_id(inst_key), |i| i.id());
+                let status = InstrumentStatus::new(
+                    instrument_id,
+                    status_action,
+                    ts_init,
+                    ts_init,
+                    None,
+                    None,
+                    Some(is_live),
+                    None,
+                    None,
+                );
+                call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
+            }
         }
     }
 }
@@ -2371,6 +2837,9 @@ fn dispatch_nautilus_ws_msg_to_python(
             if let Some(status) = status {
                 call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
             }
+        }
+        NautilusWsMessage::InstrumentStatus(status) => {
+            call_python_with_data(call_soon, callback, |py| status.into_py_any(py));
         }
         NautilusWsMessage::Raw(data) => {
             dispatch_json_value_to_python(&data, call_soon, callback);

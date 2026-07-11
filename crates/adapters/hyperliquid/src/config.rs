@@ -24,6 +24,13 @@ use crate::common::{
 };
 
 /// Configuration for the Hyperliquid data client.
+///
+/// The `stale_stream_*` options control the stream health monitor. With recovery
+/// enabled, a stale stream is warned about first, targeted-resubscribed once per
+/// recovery cooldown (preserving its original `l2Book` options), and escalated to
+/// a full WebSocket reconnect after `stale_stream_max_targeted_resubscribes`
+/// failed attempts; fresh data resets the ladder. See the Hyperliquid integration
+/// guide ("Stream health and recovery") for details.
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(
@@ -35,7 +42,7 @@ use crate::common::{
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
 )]
 pub struct HyperliquidDataClientConfig {
     /// Optional private key for authenticated endpoints.
@@ -55,10 +62,35 @@ pub struct HyperliquidDataClientConfig {
     /// WebSocket timeout in seconds.
     #[builder(default = 30)]
     pub ws_timeout_secs: u64,
+    /// Receive-age threshold in seconds for warning about stale market-data streams.
+    /// Choose a value above the instrument's expected quiet period.
+    /// Set to 0 to disable the stream health monitor.
+    #[builder(default = 120)]
+    pub stale_stream_receive_timeout_secs: u64,
+    /// Interval in seconds for running market-data stream health checks.
+    /// Set to 0 to disable the stream health monitor.
+    #[builder(default = 15)]
+    pub stream_health_check_interval_secs: u64,
+    /// Cooldown in seconds between stale warnings for the same market-data stream.
+    #[builder(default = 60)]
+    pub stale_stream_warning_cooldown_secs: u64,
+    /// Enables automated stale-stream recovery. Off by default: the stream health
+    /// monitor warns only and never changes subscriptions.
+    #[builder(default = false)]
+    pub stale_stream_recovery_enabled: bool,
+    /// Cooldown in seconds between recovery actions for the same market-data stream.
+    /// Must be positive for recovery to run.
+    #[builder(default = 120)]
+    pub stale_stream_recovery_cooldown_secs: u64,
+    /// Targeted resubscribe attempts for a stale stream before escalating to a
+    /// full WebSocket reconnect.
+    #[builder(default = 3)]
+    pub stale_stream_max_targeted_resubscribes: u32,
     /// Interval for refreshing instruments in minutes.
     #[builder(default = 60)]
     pub update_instruments_interval_mins: u64,
-    /// WebSocket transport backend (defaults to `Tungstenite`).
+    /// WebSocket transport backend (`Sockudo` by default; `Tungstenite` when
+    /// the `transport-sockudo` feature is disabled).
     #[builder(default)]
     pub transport_backend: TransportBackend,
 }
@@ -113,7 +145,7 @@ impl HyperliquidDataClientConfig {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
 )]
 pub struct HyperliquidExecClientConfig {
     /// Private key for signing transactions.
@@ -167,7 +199,11 @@ pub struct HyperliquidExecClientConfig {
     /// `SubmitOrder.params["market_order_slippage_bps"]`.
     #[builder(default = 50)]
     pub market_order_slippage_bps: u32,
-    /// WebSocket transport backend (defaults to `Tungstenite`).
+    /// If true, attach Nautilus builder attribution to eligible mainnet orders.
+    #[builder(default = true)]
+    pub include_builder_attribution: bool,
+    /// WebSocket transport backend (`Sockudo` by default; `Tungstenite` when
+    /// the `transport-sockudo` feature is disabled).
     #[builder(default)]
     pub transport_backend: TransportBackend,
     /// Timeout in seconds for WebSocket post trading requests.
@@ -250,6 +286,34 @@ transport_backend = "tungstenite"
         assert_eq!(config.http_timeout_secs, 30);
         assert_eq!(config.update_instruments_interval_mins, 10);
         assert_eq!(config.transport_backend, TransportBackend::Tungstenite);
+        assert_eq!(config.stale_stream_receive_timeout_secs, 120);
+        assert_eq!(config.stream_health_check_interval_secs, 15);
+        assert_eq!(config.stale_stream_warning_cooldown_secs, 60);
+        assert!(!config.stale_stream_recovery_enabled);
+        assert_eq!(config.stale_stream_recovery_cooldown_secs, 120);
+        assert_eq!(config.stale_stream_max_targeted_resubscribes, 3);
+    }
+
+    #[rstest]
+    fn test_data_config_toml_stale_stream_settings() {
+        let config: HyperliquidDataClientConfig = toml::from_str(
+            "
+stale_stream_receive_timeout_secs = 30
+stream_health_check_interval_secs = 5
+stale_stream_warning_cooldown_secs = 20
+stale_stream_recovery_enabled = true
+stale_stream_recovery_cooldown_secs = 45
+stale_stream_max_targeted_resubscribes = 5
+",
+        )
+        .unwrap();
+
+        assert_eq!(config.stale_stream_receive_timeout_secs, 30);
+        assert_eq!(config.stream_health_check_interval_secs, 5);
+        assert_eq!(config.stale_stream_warning_cooldown_secs, 20);
+        assert!(config.stale_stream_recovery_enabled);
+        assert_eq!(config.stale_stream_recovery_cooldown_secs, 45);
+        assert_eq!(config.stale_stream_max_targeted_resubscribes, 5);
     }
 
     #[rstest]
@@ -265,11 +329,23 @@ transport_backend = "tungstenite"
             config.market_order_slippage_bps,
             expected.market_order_slippage_bps,
         );
+        assert_eq!(
+            config.include_builder_attribution,
+            expected.include_builder_attribution,
+        );
         assert_eq!(config.transport_backend, expected.transport_backend);
         assert_eq!(config.ws_post_timeout_secs, expected.ws_post_timeout_secs);
         assert_eq!(
             config.outcome_settlement_poll_secs,
             expected.outcome_settlement_poll_secs,
         );
+    }
+
+    #[rstest]
+    fn test_exec_config_toml_include_builder_attribution_false() {
+        let config: HyperliquidExecClientConfig =
+            toml::from_str("include_builder_attribution = false").unwrap();
+
+        assert!(!config.include_builder_attribution);
     }
 }

@@ -60,7 +60,7 @@ use crate::{
     python::encoder::PyDydxClientOrderIdEncoder,
     websocket::{
         DydxWsDispatchState, OrderIdentity,
-        client::DydxWebSocketClient,
+        client::{DydxWebSocketClient, candle_ids_from_topics},
         enums::DydxWsOutputMessage,
         fill_report_to_order_filled, parse as ws_parse,
         parse::{parse_ws_fill_report, parse_ws_order_report, parse_ws_position_report},
@@ -103,7 +103,7 @@ impl DydxWebSocketClient {
         ))
     }
 
-    /// Returns `true` when the client is connected.
+    /// Returns `true` when any connection in the pool is connected.
     #[pyo3(name = "is_connected")]
     fn py_is_connected(&self) -> bool {
         self.is_connected()
@@ -176,10 +176,14 @@ impl DydxWebSocketClient {
         self.url().to_string()
     }
 
-    /// Connects the websocket client in handler mode with automatic reconnection.
+    /// Connects the websocket client and opens the primary pool slot.
     ///
-    /// Spawns a background handler task that owns the WebSocketClient and processes
-    /// raw messages into venue-specific `DydxWsOutputMessage` values.
+    /// Additional slots are spawned lazily by `subscribe_*` methods once the
+    /// per-channel limit is reached on every existing slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be established.
     #[pyo3(name = "connect")]
     #[pyo3(signature = (loop_, instruments, callback, trader_id=None))]
     #[expect(clippy::needless_pass_by_value)]
@@ -782,11 +786,12 @@ impl DydxWebSocketClient {
                                 });
                             }
                             DydxWsOutputMessage::Error(err) => {
-                                log::error!("dYdX WebSocket error: {err}");
+                                log::warn!("dYdX WebSocket error: {err}");
                             }
-                            DydxWsOutputMessage::Reconnected => {
+                            DydxWsOutputMessage::Reconnected { topics } => {
                                 log::info!("dYdX WebSocket reconnected");
-                                pending_bars.clear();
+                                let reconnected_candles = candle_ids_from_topics(&topics);
+                                pending_bars.retain(|id, _| !reconnected_candles.contains(id));
                             }
                         }
                     }
@@ -797,14 +802,11 @@ impl DydxWebSocketClient {
         })
     }
 
-    /// Disconnects the websocket client gracefully.
-    ///
-    /// Sends a disconnect command to the handler, sets the stop signal, then
-    /// awaits the handler task with a timeout before aborting.
+    /// Disconnects all websocket connections in the pool.
     ///
     /// # Errors
     ///
-    /// Returns an error if the underlying client cannot be accessed.
+    /// Returns an error if the underlying clients cannot be accessed.
     #[pyo3(name = "disconnect")]
     fn py_disconnect<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let mut client = self.clone();
@@ -883,6 +885,10 @@ impl DydxWebSocketClient {
 
     /// Subscribes to public trade updates for a specific instrument.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
+    ///
     /// # References
     ///
     /// <https://docs.dydx.trade/developers/indexer/websockets#trades-channel>
@@ -903,6 +909,10 @@ impl DydxWebSocketClient {
     }
 
     /// Unsubscribes from public trade updates for a specific instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_trades")]
     fn py_unsubscribe_trades<'py>(
         &self,
@@ -920,6 +930,10 @@ impl DydxWebSocketClient {
     }
 
     /// Subscribes to orderbook updates for a specific instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription request fails.
     ///
     /// # References
     ///
@@ -941,6 +955,10 @@ impl DydxWebSocketClient {
     }
 
     /// Unsubscribes from orderbook updates for a specific instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_orderbook")]
     fn py_unsubscribe_orderbook<'py>(
         &self,
@@ -1051,7 +1069,15 @@ impl DydxWebSocketClient {
     /// Subscribes to subaccount updates (orders, fills, positions, balances).
     ///
     /// This requires authentication and will only work for private WebSocket clients
-    /// created with `Self.new_private`.
+    /// created with `Self.new_private`. Subaccount streams stay pinned to the
+    /// primary slot: the Indexer caps them at 256 per connection, which is well
+    /// above realistic per-process usage and keeps related fill/position events
+    /// on a single in-order stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client was not created with credentials or if the
+    /// subscription request fails.
     ///
     /// # References
     ///
@@ -1074,6 +1100,10 @@ impl DydxWebSocketClient {
     }
 
     /// Unsubscribes from subaccount updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscription request fails.
     #[pyo3(name = "unsubscribe_subaccount")]
     fn py_unsubscribe_subaccount<'py>(
         &self,
@@ -1194,7 +1224,7 @@ fn handle_markets_trading_data(
                 seen_tickers.insert(ticker_ustr);
             } else if is_active {
                 seen_tickers.insert(ticker_ustr);
-                log::info!("New instrument discovered via WebSocket: {ticker}");
+                log::debug!("New instrument discovered via WebSocket: {ticker}");
                 Python::attach(|py| {
                     let dict = PyDict::new(py);
                     let _ = dict.set_item("type", "new_instrument_discovered");

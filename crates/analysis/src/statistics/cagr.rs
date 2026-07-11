@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use nautilus_core::UnixNanos;
+use nautilus_model::position::Position;
 
 use crate::statistic::PortfolioStatistic;
 
@@ -29,6 +30,12 @@ use crate::statistic::PortfolioStatistic;
 /// Formula: CAGR = (Ending Value / Beginning Value)^(Period/Days) - 1
 ///
 /// For returns: CAGR = ((1 + Total Return)^(Period/Days)) - 1
+///
+/// # References
+///
+/// - Bacon, C. R. (2008). *Practical Portfolio Performance Measurement and Attribution*
+///   (2nd ed.). Wiley.
+/// - CFA Institute Level I Curriculum: Quantitative Methods
 #[repr(C)]
 #[derive(Debug, Clone)]
 #[cfg_attr(
@@ -84,6 +91,13 @@ impl PortfolioStatistic for CAGR {
         } else {
             Some(0.0)
         }
+    }
+    fn calculate_from_realized_pnls(&self, _realized_pnls: &[f64]) -> Option<Self::Item> {
+        None
+    }
+
+    fn calculate_from_positions(&self, _positions: &[Position]) -> Option<Self::Item> {
+        None
     }
 }
 

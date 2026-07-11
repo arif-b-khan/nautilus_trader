@@ -110,6 +110,12 @@ def test_json_schema(config_cls):
     assert isinstance(schema, dict), f"Schema for {config_cls.__name__} is not a dict"
 
 
+def test_trading_node_config_defaults_to_60_second_connection_timeout() -> None:
+    config = TradingNodeConfig()
+
+    assert config.timeout_connection == 60.0
+
+
 def test_parse_rejects_unknown_field() -> None:
     # Arrange
     raw = msgspec.json.encode(
@@ -517,6 +523,18 @@ def test_encoding_timedelta() -> None:
 
     # Assert
     assert result == obj.isoformat()
+
+
+def test_encoding_dataframe_uses_custom_encoder() -> None:
+    # Arrange
+    obj = pd.DataFrame({"LOCATION": ["LDN"], "VALUE": [1.23]})
+
+    # Act
+    result = msgspec_encoding_hook(obj)
+
+    # Assert
+    assert isinstance(result, str)
+    assert '"LOCATION":{"0":"LDN"}' in result
 
 
 def test_decoding_timedelta() -> None:

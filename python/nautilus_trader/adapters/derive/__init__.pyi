@@ -5,6 +5,7 @@ import enum
 import typing
 
 from nautilus_trader import model
+from nautilus_trader import network
 
 __all__ = [
     "DERIVE",
@@ -32,6 +33,7 @@ class DeriveDataClientConfig:
         currencies: typing.Sequence[str] | None = None,
         include_expired: bool | None = None,
         auto_load_missing_instruments: bool | None = None,
+        transport_backend: network.TransportBackend | None = None,
     ) -> None: ...
     @property
     def proxy_url(self) -> str | None: ...
@@ -62,6 +64,8 @@ class DeriveExecClientConfig:
         trade_module_address: str | None = None,
         signature_expiry_secs: int | None = None,
         market_order_slippage_bps: int | None = None,
+        max_matching_requests_per_second: int | None = None,
+        transport_backend: network.TransportBackend | None = None,
     ) -> None: ...
     @property
     def proxy_url(self) -> str | None: ...

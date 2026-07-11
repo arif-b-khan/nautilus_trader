@@ -311,6 +311,7 @@ class BettingInstrument:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -420,6 +421,7 @@ class BinaryOption:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -665,6 +667,7 @@ class Cfd:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -769,6 +772,7 @@ class Commodity:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -864,6 +868,7 @@ class CryptoFuture:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -958,6 +963,7 @@ class CryptoFuturesSpread:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1055,6 +1061,7 @@ class CryptoOption:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1153,6 +1160,7 @@ class CryptoOptionSpread:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1246,6 +1254,7 @@ class CryptoPerpetual:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1362,6 +1371,7 @@ class CurrencyPair:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1471,6 +1481,7 @@ class Equity:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1709,6 +1720,7 @@ class FuturesContract:
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
         exchange: str | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1795,6 +1807,7 @@ class FuturesSpread:
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
         exchange: str | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -1920,6 +1933,7 @@ class IndexInstrument:
         size_increment: Quantity,
         ts_event: int,
         ts_init: int,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -2410,11 +2424,11 @@ class MarginAccount:
     def initial_margins(self) -> typing.Any: ...
     def maintenance_margins(self) -> typing.Any: ...
     def update_initial_margin(self, instrument_id: InstrumentId, initial_margin: Money) -> None: ...
-    def initial_margin(self, instrument_id: InstrumentId) -> Money: ...
+    def initial_margin(self, instrument_id: InstrumentId) -> Money | None: ...
     def update_maintenance_margin(
         self, instrument_id: InstrumentId, maintenance_margin: Money
     ) -> None: ...
-    def maintenance_margin(self, instrument_id: InstrumentId) -> Money: ...
+    def maintenance_margin(self, instrument_id: InstrumentId) -> Money | None: ...
     def calculate_initial_margin(
         self,
         instrument: typing.Any,
@@ -2881,6 +2895,7 @@ class OptionContract:
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
         exchange: str | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -3055,6 +3070,7 @@ class OptionSpread:
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
         exchange: str | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -3598,6 +3614,7 @@ class OrderFilled:
         reconciliation: bool,
         position_id: PositionId | None = None,
         commission: Money | None = None,
+        info: typing.Mapping[str, str] | None = None,
     ) -> None: ...
     @property
     def is_buy(self) -> bool: ...
@@ -3640,6 +3657,8 @@ class OrderFilled:
     @property
     def commission(self) -> Money | None: ...
     @property
+    def info(self) -> dict[str, str] | None: ...
+    @property
     def order_type(self) -> OrderType: ...
     @staticmethod
     def from_dict(values: dict) -> OrderFilled: ...
@@ -3665,6 +3684,7 @@ class OrderInitialized:
         ts_event: int,
         ts_init: int,
         price: Price | None = None,
+        activation_price: Price | None = None,
         trigger_price: Price | None = None,
         trigger_type: TriggerType | None = None,
         limit_offset: decimal.Decimal | None = None,
@@ -3751,7 +3771,7 @@ class OrderPendingCancel:
         strategy_id: StrategyId,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId,
-        account_id: AccountId,
+        account_id: AccountId | None,
         event_id: core.UUID4,
         ts_event: int,
         ts_init: int,
@@ -3771,7 +3791,7 @@ class OrderPendingCancel:
     @property
     def venue_order_id(self) -> VenueOrderId | None: ...
     @property
-    def account_id(self) -> AccountId: ...
+    def account_id(self) -> AccountId | None: ...
     @property
     def event_id(self) -> core.UUID4: ...
     @property
@@ -3790,7 +3810,7 @@ class OrderPendingUpdate:
         strategy_id: StrategyId,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId,
-        account_id: AccountId,
+        account_id: AccountId | None,
         event_id: core.UUID4,
         ts_event: int,
         ts_init: int,
@@ -3810,7 +3830,7 @@ class OrderPendingUpdate:
     @property
     def venue_order_id(self) -> VenueOrderId | None: ...
     @property
-    def account_id(self) -> AccountId: ...
+    def account_id(self) -> AccountId | None: ...
     @property
     def event_id(self) -> core.UUID4: ...
     @property
@@ -3925,6 +3945,7 @@ class OrderStatusReport:
         contingency_type: ContingencyType | None = None,
         expire_time: int | None = None,
         price: Price | None = None,
+        activation_price: Price | None = None,
         trigger_price: Price | None = None,
         trigger_type: TriggerType | None = None,
         limit_offset: decimal.Decimal | None = None,
@@ -3979,6 +4000,8 @@ class OrderStatusReport:
     def expire_time(self) -> int | None: ...
     @property
     def price(self) -> Price | None: ...
+    @property
+    def activation_price(self) -> Price | None: ...
     @property
     def trigger_price(self) -> Price | None: ...
     @property
@@ -4253,6 +4276,7 @@ class PerpetualContract:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -4412,6 +4436,100 @@ class PoolFeeCollect:
     def ts_init(self) -> int: ...
 
 @typing.final
+class PoolFeeProtocolCollect:
+    def __init__(
+        self,
+        chain: Chain,
+        dex: Dex,
+        pool_identifier: str,
+        instrument_id: InstrumentId,
+        block: int,
+        transaction_hash: str,
+        transaction_index: int,
+        log_index: int,
+        sender: str,
+        recipient: str,
+        amount0: str,
+        amount1: str,
+        timestamp: int,
+    ) -> None: ...
+    def __hash__(self) -> int: ...
+    @property
+    def chain(self) -> Chain: ...
+    @property
+    def dex(self) -> Dex: ...
+    @property
+    def instrument_id(self) -> InstrumentId: ...
+    @property
+    def pool_identifier(self) -> str: ...
+    @property
+    def block(self) -> int: ...
+    @property
+    def transaction_hash(self) -> str: ...
+    @property
+    def transaction_index(self) -> int: ...
+    @property
+    def log_index(self) -> int: ...
+    @property
+    def sender(self) -> str: ...
+    @property
+    def recipient(self) -> str: ...
+    @property
+    def amount0(self) -> str: ...
+    @property
+    def amount1(self) -> str: ...
+    @property
+    def timestamp(self) -> int: ...
+    @property
+    def ts_event(self) -> int: ...
+    @property
+    def ts_init(self) -> int: ...
+
+@typing.final
+class PoolFeeProtocolUpdate:
+    def __init__(
+        self,
+        chain: Chain,
+        dex: Dex,
+        pool_identifier: str,
+        instrument_id: InstrumentId,
+        block: int,
+        transaction_hash: str,
+        transaction_index: int,
+        log_index: int,
+        fee_protocol0_new: int,
+        fee_protocol1_new: int,
+        timestamp: int,
+    ) -> None: ...
+    def __hash__(self) -> int: ...
+    @property
+    def chain(self) -> Chain: ...
+    @property
+    def dex(self) -> Dex: ...
+    @property
+    def instrument_id(self) -> InstrumentId: ...
+    @property
+    def pool_identifier(self) -> str: ...
+    @property
+    def block(self) -> int: ...
+    @property
+    def transaction_hash(self) -> str: ...
+    @property
+    def transaction_index(self) -> int: ...
+    @property
+    def log_index(self) -> int: ...
+    @property
+    def fee_protocol0_new(self) -> int: ...
+    @property
+    def fee_protocol1_new(self) -> int: ...
+    @property
+    def timestamp(self) -> int: ...
+    @property
+    def ts_event(self) -> int: ...
+    @property
+    def ts_init(self) -> int: ...
+
+@typing.final
 class PoolFlash:
     def __init__(
         self,
@@ -4543,7 +4661,7 @@ class PoolProfiler:
     @property
     def current_tick(self) -> int: ...
     @property
-    def price_sqrt_ratio_x96(self) -> str: ...
+    def price_sqrt_ratio_x96(self) -> int: ...
     @property
     def total_amount0_deposited(self) -> str: ...
     @property
@@ -4558,6 +4676,10 @@ class PoolProfiler:
     def protocol_fees_token1(self) -> str: ...
     @property
     def fee_protocol(self) -> int: ...
+    @property
+    def fee_protocol0_basis_points(self) -> int | None: ...
+    @property
+    def fee_protocol1_basis_points(self) -> int | None: ...
     def get_active_liquidity(self) -> int: ...
     def get_active_tick_count(self) -> int: ...
     def get_total_tick_count(self) -> int: ...
@@ -4624,6 +4746,18 @@ class PoolSwap:
     def log_index(self) -> int: ...
     @property
     def sender(self) -> str: ...
+    @property
+    def recipient(self) -> str: ...
+    @property
+    def amount0(self) -> str: ...
+    @property
+    def amount1(self) -> str: ...
+    @property
+    def sqrt_price_x96(self) -> str: ...
+    @property
+    def liquidity(self) -> str: ...
+    @property
+    def tick(self) -> int: ...
     @property
     def timestamp(self) -> int: ...
     @property
@@ -5102,6 +5236,8 @@ class StrikeRange:
     def atm_relative(strikes_above: int, strikes_below: int) -> StrikeRange: ...
     @staticmethod
     def atm_percent(pct: float) -> StrikeRange: ...
+    @staticmethod
+    def delta(target: float, tolerance: float) -> StrikeRange: ...
     @property
     def kind(self) -> str: ...
 
@@ -5617,6 +5753,7 @@ class TokenizedAsset:
         margin_maint: decimal.Decimal | None = None,
         maker_fee: decimal.Decimal | None = None,
         taker_fee: decimal.Decimal | None = None,
+        tick_scheme: str | None = None,
         info: dict | None = None,
     ) -> None: ...
     def __hash__(self) -> int: ...
@@ -5771,8 +5908,8 @@ class TrailingStopLimitOrder:
         client_order_id: ClientOrderId,
         order_side: OrderSide,
         quantity: Quantity,
-        price: Price,
-        trigger_price: Price,
+        price: Price | None,
+        trigger_price: Price | None,
         trigger_type: TriggerType,
         limit_offset: decimal.Decimal,
         trailing_offset: decimal.Decimal,
@@ -5783,6 +5920,7 @@ class TrailingStopLimitOrder:
         quote_quantity: bool,
         init_id: core.UUID4,
         ts_init: int,
+        activation_price: Price | None = None,
         expire_time: int | None = None,
         display_qty: Quantity | None = None,
         emulation_trigger: TriggerType | None = None,
@@ -5817,9 +5955,9 @@ class TrailingStopLimitOrder:
     @property
     def quantity(self) -> Quantity: ...
     @property
-    def price(self) -> Price: ...
+    def price(self) -> Price | None: ...
     @property
-    def trigger_price(self) -> Price: ...
+    def trigger_price(self) -> Price | None: ...
     @property
     def trigger_type(self) -> TriggerType: ...
     @property
@@ -5904,7 +6042,7 @@ class TrailingStopMarketOrder:
         client_order_id: ClientOrderId,
         order_side: OrderSide,
         quantity: Quantity,
-        trigger_price: Price,
+        trigger_price: Price | None,
         trigger_type: TriggerType,
         trailing_offset: decimal.Decimal,
         trailing_offset_type: TrailingOffsetType,
@@ -5913,6 +6051,7 @@ class TrailingStopMarketOrder:
         quote_quantity: bool,
         init_id: core.UUID4,
         ts_init: int,
+        activation_price: Price | None = None,
         expire_time: int | None = None,
         display_qty: Quantity | None = None,
         emulation_trigger: TriggerType | None = None,
@@ -5947,7 +6086,7 @@ class TrailingStopMarketOrder:
     @property
     def quantity(self) -> Quantity: ...
     @property
-    def trigger_price(self) -> Price: ...
+    def trigger_price(self) -> Price | None: ...
     @property
     def trigger_type(self) -> TriggerType: ...
     @property
@@ -6349,6 +6488,8 @@ class DefiData(Enum):
     PoolSwap = ...
     PoolLiquidityUpdate = ...
     PoolFeeCollect = ...
+    PoolFeeProtocolUpdate = ...
+    PoolFeeProtocolCollect = ...
     PoolFlash = ...
 
     @property

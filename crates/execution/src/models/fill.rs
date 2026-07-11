@@ -13,7 +13,11 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::fmt::Display;
+use std::{
+    cell::RefCell,
+    fmt::{Debug, Display},
+    rc::Rc,
+};
 
 #[cfg(all(feature = "simulation", madsim))]
 use madsim::rand::RngCore;
@@ -42,18 +46,30 @@ fn unlimited_liquidity(precision: u8) -> Quantity {
 
 pub trait FillModel {
     /// Returns `true` if a limit order should be filled based on the model.
-    fn is_limit_filled(&mut self) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot determine whether the order should fill.
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool>;
 
     /// Returns `true` if an order fill should slip by one tick.
-    fn is_slipped(&mut self) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot determine whether the order should slip.
+    fn is_slipped(&mut self) -> anyhow::Result<bool>;
 
     /// Returns whether limit orders at or inside the spread are fillable.
     ///
     /// When true, the matching core treats a limit order as fillable if its
     /// price is at or better than the current best quote on its own side
     /// (BUY >= bid, SELL <= ask), not just when it crosses the spread.
-    fn fill_limit_inside_spread(&self) -> bool {
-        false
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot determine its spread-fill behavior.
+    fn fill_limit_inside_spread(&self) -> anyhow::Result<bool> {
+        Ok(false)
     }
 
     /// Returns a simulated `OrderBook` for fill simulation.
@@ -63,13 +79,84 @@ pub trait FillModel {
     /// uses this to determine fills.
     ///
     /// Returns `None` to use the matching engine's standard fill logic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot provide simulated liquidity.
     fn get_orderbook_for_fill_simulation(
         &mut self,
         instrument: &InstrumentAny,
         order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook>;
+    ) -> anyhow::Result<Option<OrderBook>>;
+}
+
+/// Shared runtime handle for a fill model.
+#[derive(Clone)]
+pub struct FillModelHandle(Rc<RefCell<dyn FillModel>>);
+
+impl FillModelHandle {
+    /// Creates a new [`FillModelHandle`] from a fill model.
+    #[must_use]
+    pub fn new<T>(model: T) -> Self
+    where
+        T: FillModel + 'static,
+    {
+        Self(Rc::new(RefCell::new(model)))
+    }
+
+    /// Creates a new [`FillModelHandle`] from an existing reference-counted model.
+    #[must_use]
+    pub fn from_rc(model: Rc<RefCell<dyn FillModel>>) -> Self {
+        Self(model)
+    }
+}
+
+impl Debug for FillModelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple(stringify!(FillModelHandle))
+            .field(&"<dyn FillModel>")
+            .finish()
+    }
+}
+
+impl FillModel for FillModelHandle {
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        self.0.borrow_mut().is_limit_filled()
+    }
+
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        self.0.borrow_mut().is_slipped()
+    }
+
+    fn fill_limit_inside_spread(&self) -> anyhow::Result<bool> {
+        self.0.borrow().fill_limit_inside_spread()
+    }
+
+    fn get_orderbook_for_fill_simulation(
+        &mut self,
+        instrument: &InstrumentAny,
+        order: &OrderAny,
+        best_bid: Price,
+        best_ask: Price,
+    ) -> anyhow::Result<Option<OrderBook>> {
+        self.0
+            .borrow_mut()
+            .get_orderbook_for_fill_simulation(instrument, order, best_bid, best_ask)
+    }
+}
+
+impl Default for FillModelHandle {
+    fn default() -> Self {
+        FillModelAny::default().into()
+    }
+}
+
+impl From<FillModelAny> for FillModelHandle {
+    fn from(model: FillModelAny) -> Self {
+        Self::new(model)
+    }
 }
 
 #[derive(Debug)]
@@ -222,12 +309,12 @@ impl Display for DefaultFillModel {
 }
 
 impl FillModel for DefaultFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -236,8 +323,8 @@ impl FillModel for DefaultFillModel {
         _order: &OrderAny,
         _best_bid: Price,
         _best_ask: Price,
-    ) -> Option<OrderBook> {
-        None
+    ) -> anyhow::Result<Option<OrderBook>> {
+        Ok(None)
     }
 }
 
@@ -291,16 +378,16 @@ impl Default for BestPriceFillModel {
 }
 
 impl FillModel for BestPriceFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
-    fn fill_limit_inside_spread(&self) -> bool {
-        true
+    fn fill_limit_inside_spread(&self) -> anyhow::Result<bool> {
+        Ok(true)
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -309,7 +396,7 @@ impl FillModel for BestPriceFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let mut book = build_l2_book(instrument.id());
         let size_prec = instrument.size_precision();
         add_order(
@@ -326,7 +413,7 @@ impl FillModel for BestPriceFillModel {
             unlimited_liquidity(size_prec),
             2,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -380,12 +467,12 @@ impl Default for OneTickSlippageFillModel {
 }
 
 impl FillModel for OneTickSlippageFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -394,7 +481,7 @@ impl FillModel for OneTickSlippageFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -413,7 +500,7 @@ impl FillModel for OneTickSlippageFillModel {
             unlimited_liquidity(size_prec),
             2,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -467,12 +554,12 @@ impl Default for ProbabilisticFillModel {
 }
 
 impl FillModel for ProbabilisticFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -481,7 +568,7 @@ impl FillModel for ProbabilisticFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -517,7 +604,7 @@ impl FillModel for ProbabilisticFillModel {
                 2,
             );
         }
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -571,12 +658,12 @@ impl Default for TwoTierFillModel {
 }
 
 impl FillModel for TwoTierFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -585,7 +672,7 @@ impl FillModel for TwoTierFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -618,7 +705,7 @@ impl FillModel for TwoTierFillModel {
             unlimited_liquidity(size_prec),
             4,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -672,12 +759,12 @@ impl Default for ThreeTierFillModel {
 }
 
 impl FillModel for ThreeTierFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -686,7 +773,7 @@ impl FillModel for ThreeTierFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let two_ticks = tick + tick;
         let size_prec = instrument.size_precision();
@@ -734,7 +821,7 @@ impl FillModel for ThreeTierFillModel {
             Quantity::new(20.0, size_prec),
             6,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -788,12 +875,12 @@ impl Default for LimitOrderPartialFillModel {
 }
 
 impl FillModel for LimitOrderPartialFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -802,7 +889,7 @@ impl FillModel for LimitOrderPartialFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -835,7 +922,7 @@ impl FillModel for LimitOrderPartialFillModel {
             unlimited_liquidity(size_prec),
             4,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -890,12 +977,12 @@ impl Default for SizeAwareFillModel {
 }
 
 impl FillModel for SizeAwareFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -904,7 +991,7 @@ impl FillModel for SizeAwareFillModel {
         order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -934,7 +1021,7 @@ impl FillModel for SizeAwareFillModel {
             add_order(&mut book, OrderSide::Buy, best_bid - tick, remaining, 3);
             add_order(&mut book, OrderSide::Sell, best_ask + tick, remaining, 4);
         }
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -992,12 +1079,12 @@ impl Default for CompetitionAwareFillModel {
 }
 
 impl FillModel for CompetitionAwareFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -1006,7 +1093,7 @@ impl FillModel for CompetitionAwareFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
 
@@ -1030,7 +1117,7 @@ impl FillModel for CompetitionAwareFillModel {
             Quantity::new(available_ask, size_prec),
             2,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -1092,12 +1179,12 @@ impl Default for VolumeSensitiveFillModel {
 }
 
 impl FillModel for VolumeSensitiveFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -1106,7 +1193,7 @@ impl FillModel for VolumeSensitiveFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -1142,7 +1229,7 @@ impl FillModel for VolumeSensitiveFillModel {
             unlimited_liquidity(size_prec),
             4,
         );
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -1208,12 +1295,12 @@ impl Default for MarketHoursFillModel {
 }
 
 impl FillModel for MarketHoursFillModel {
-    fn is_limit_filled(&mut self) -> bool {
-        self.state.is_limit_filled()
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_limit_filled())
     }
 
-    fn is_slipped(&mut self) -> bool {
-        self.state.is_slipped()
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.state.is_slipped())
     }
 
     fn get_orderbook_for_fill_simulation(
@@ -1222,7 +1309,7 @@ impl FillModel for MarketHoursFillModel {
         _order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         let tick = instrument.price_increment();
         let size_prec = instrument.size_precision();
         let mut book = build_l2_book(instrument.id());
@@ -1259,7 +1346,7 @@ impl FillModel for MarketHoursFillModel {
                 2,
             );
         }
-        Some(book)
+        Ok(Some(book))
     }
 }
 
@@ -1279,7 +1366,7 @@ pub enum FillModelAny {
 }
 
 impl FillModel for FillModelAny {
-    fn is_limit_filled(&mut self) -> bool {
+    fn is_limit_filled(&mut self) -> anyhow::Result<bool> {
         match self {
             Self::Default(m) => m.is_limit_filled(),
             Self::BestPrice(m) => m.is_limit_filled(),
@@ -1295,7 +1382,7 @@ impl FillModel for FillModelAny {
         }
     }
 
-    fn fill_limit_inside_spread(&self) -> bool {
+    fn fill_limit_inside_spread(&self) -> anyhow::Result<bool> {
         match self {
             Self::Default(m) => m.fill_limit_inside_spread(),
             Self::BestPrice(m) => m.fill_limit_inside_spread(),
@@ -1311,7 +1398,7 @@ impl FillModel for FillModelAny {
         }
     }
 
-    fn is_slipped(&mut self) -> bool {
+    fn is_slipped(&mut self) -> anyhow::Result<bool> {
         match self {
             Self::Default(m) => m.is_slipped(),
             Self::BestPrice(m) => m.is_slipped(),
@@ -1333,7 +1420,7 @@ impl FillModel for FillModelAny {
         order: &OrderAny,
         best_bid: Price,
         best_ask: Price,
-    ) -> Option<OrderBook> {
+    ) -> anyhow::Result<Option<OrderBook>> {
         match self {
             Self::Default(m) => {
                 m.get_orderbook_for_fill_simulation(instrument, order, best_bid, best_ask)
@@ -1455,14 +1542,14 @@ mod tests {
     #[rstest]
     fn test_fill_model_is_limit_filled(mut fill_model: DefaultFillModel) {
         // Fixed seed makes this deterministic
-        let result = fill_model.is_limit_filled();
+        let result = fill_model.is_limit_filled().unwrap();
         assert!(!result);
     }
 
     #[rstest]
     fn test_fill_model_is_slipped(mut fill_model: DefaultFillModel) {
         // Fixed seed makes this deterministic
-        let result = fill_model.is_slipped();
+        let result = fill_model.is_slipped().unwrap();
         assert!(!result);
     }
 
@@ -1476,12 +1563,14 @@ mod tests {
             .build();
 
         let mut model = DefaultFillModel::default();
-        let result = model.get_orderbook_for_fill_simulation(
-            &instrument,
-            &order,
-            Price::from("0.80000"),
-            Price::from("0.80010"),
-        );
+        let result = model
+            .get_orderbook_for_fill_simulation(
+                &instrument,
+                &order,
+                Price::from("0.80000"),
+                Price::from("0.80010"),
+            )
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -1495,12 +1584,14 @@ mod tests {
             .build();
 
         let mut model = BestPriceFillModel::default();
-        let result = model.get_orderbook_for_fill_simulation(
-            &instrument,
-            &order,
-            Price::from("0.80000"),
-            Price::from("0.80010"),
-        );
+        let result = model
+            .get_orderbook_for_fill_simulation(
+                &instrument,
+                &order,
+                Price::from("0.80000"),
+                Price::from("0.80010"),
+            )
+            .unwrap();
         assert!(result.is_some());
         let book = result.unwrap();
         assert_eq!(book.best_bid_price().unwrap(), Price::from("0.80000"));
@@ -1521,8 +1612,9 @@ mod tests {
         let best_ask = Price::from("0.80010");
 
         let mut model = OneTickSlippageFillModel::default();
-        let result =
-            model.get_orderbook_for_fill_simulation(&instrument, &order, best_bid, best_ask);
+        let result = model
+            .get_orderbook_for_fill_simulation(&instrument, &order, best_bid, best_ask)
+            .unwrap();
         assert!(result.is_some());
         let book = result.unwrap();
 
@@ -1539,37 +1631,56 @@ mod tests {
     #[rstest]
     fn test_fill_model_any_is_limit_filled() {
         let mut model = FillModelAny::Default(DefaultFillModel::new(0.5, 0.1, Some(42)).unwrap());
-        let result = model.is_limit_filled();
+        let result = model.is_limit_filled().unwrap();
         assert!(!result);
+    }
+
+    #[rstest]
+    fn test_fill_model_handle_from_any_owns_state_per_conversion() {
+        let model = FillModelAny::Default(DefaultFillModel::new(0.5, 0.0, Some(42)).unwrap());
+        let mut expected_model = model.clone();
+        let mut first: FillModelHandle = model.clone().into();
+        let mut second: FillModelHandle = model.into();
+
+        let expected: Vec<_> = (0..16)
+            .map(|_| expected_model.is_limit_filled().unwrap())
+            .collect();
+        let first_results: Vec<_> = (0..16).map(|_| first.is_limit_filled().unwrap()).collect();
+        let second_results: Vec<_> = (0..16).map(|_| second.is_limit_filled().unwrap()).collect();
+        let has_variation = expected.windows(2).any(|window| window[0] != window[1]);
+
+        assert!(has_variation);
+        assert_eq!(first_results, expected);
+        assert_eq!(second_results, expected);
     }
 
     #[rstest]
     fn test_default_fill_model_fill_limit_inside_spread_is_false() {
         let model = DefaultFillModel::default();
-        assert!(!model.fill_limit_inside_spread());
+        assert!(!model.fill_limit_inside_spread().unwrap());
     }
 
     #[rstest]
     fn test_best_price_fill_model_fill_limit_inside_spread_is_true() {
         let model = BestPriceFillModel::default();
-        assert!(model.fill_limit_inside_spread());
+        assert!(model.fill_limit_inside_spread().unwrap());
     }
 
     #[rstest]
     fn test_one_tick_slippage_fill_model_fill_limit_inside_spread_is_false() {
         let model = OneTickSlippageFillModel::default();
-        assert!(!model.fill_limit_inside_spread());
+        assert!(!model.fill_limit_inside_spread().unwrap());
     }
 
     #[rstest]
     fn test_fill_model_any_fill_limit_inside_spread_dispatch() {
         let default = FillModelAny::Default(DefaultFillModel::default());
-        assert!(!default.fill_limit_inside_spread());
+        assert!(!default.fill_limit_inside_spread().unwrap());
 
         let best_price = FillModelAny::BestPrice(BestPriceFillModel::default());
-        assert!(best_price.fill_limit_inside_spread());
+        assert!(best_price.fill_limit_inside_spread().unwrap());
 
         let one_tick = FillModelAny::OneTickSlippage(OneTickSlippageFillModel::default());
-        assert!(!one_tick.fill_limit_inside_spread());
+        assert!(!one_tick.fill_limit_inside_spread().unwrap());
     }
 }

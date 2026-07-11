@@ -42,6 +42,7 @@
 
 pub mod backend;
 pub mod capture;
+pub mod codec;
 pub mod entry;
 pub mod error;
 pub mod hash;
@@ -56,6 +57,7 @@ pub mod snapshot;
 pub mod verifier;
 pub mod writer;
 
+mod format;
 mod wire;
 
 pub use backend::{
@@ -80,12 +82,22 @@ pub use kernel::{
 };
 pub use manifest::{RunId, RunManifest, RunStatus};
 pub use markers::{
-    DataClass, DataCursorSnapshot, HiFiMarker, MarkerGap, MarkerGapReason, StreamCursor,
-    StreamDictEntry, StreamSlot, compute_hifi_hash, compute_marker_hash,
+    CursorState, DEFAULT_MARKER_CHANNEL_CAPACITY, DEFAULT_MARKER_MAX_BATCH,
+    DEFAULT_MARKER_MAX_LATENCY, DataClass, DataCursorSnapshot, DataMarkerCapture,
+    DataMarkerExtractor, DataMarkerExtractorRegistry, HiFiMarker, MarkerBackend, MarkerCountKind,
+    MarkerFinding, MarkerGap, MarkerGapReason, MarkerManifest, MarkerMsg, MarkerReader,
+    MarkerRecordKind, MarkerVerifier, MarkerVerifyReport, MarkerWriter, MarkerWriterConfig,
+    MemoryMarkerBackend, RedbMarkerBackend, StoredMarkerRecord, StreamCursor, StreamDictEntry,
+    StreamSlot, compute_dict_hash, compute_gap_hash, compute_hifi_hash, compute_marker_hash,
 };
+#[cfg(feature = "persistence")]
+pub use markers::{JoinedStream, join_at_entry};
 pub use nautilus_system::{
     RegisteredComponents,
-    event_store::{EventStoreConfig, RetentionMode, RunIdentity},
+    event_store::{
+        DEFAULT_DATA_MARKER_CHANNEL_CAPACITY, DEFAULT_DATA_MARKER_SAFETY_FLUSH_INTERVAL,
+        DataMarkerClass, DataMarkerConfig, EventStoreConfig, RetentionMode, RunIdentity,
+    },
 };
 pub use reader::{DEFAULT_SCAN_CHUNK_SIZE, EventStoreReader, RangeScan, SnapshotReplayPlan};
 #[cfg(feature = "persistence")]

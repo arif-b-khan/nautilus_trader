@@ -28,14 +28,14 @@ use std::{
     process::Command,
 };
 
-use bincode::config::standard;
 use bytes::Bytes;
 use indexmap::IndexMap;
 use nautilus_core::UnixNanos;
 use nautilus_event_store::{
-    AppendEntry, EventStore, EventStoreEntry, GapRange, Headers, IndexKey, IndexKind, RedbBackend,
-    RegisteredComponents, RunManifest, RunStatus, Topic, Verifier, VerifyFinding,
-    compute_entry_hash,
+    AppendEntry, DataClass, DataCursorSnapshot, EventStore, EventStoreEntry, GapRange, Headers,
+    IndexKey, IndexKind, MarkerBackend, MarkerManifest, RedbBackend, RedbMarkerBackend,
+    RegisteredComponents, RunManifest, RunStatus, SnapshotAnchor, StreamCursor, Topic, Verifier,
+    VerifyFinding, codec, compute_entry_hash, compute_marker_hash,
 };
 use redb::ReadableTable;
 use rstest::rstest;
@@ -131,6 +131,38 @@ fn run_path(tmp: &TempDir, run_id: &str) -> std::path::PathBuf {
     tmp.path().join(INSTANCE_ID).join(format!("{run_id}.redb"))
 }
 
+fn marker_path(tmp: &TempDir, run_id: &str) -> std::path::PathBuf {
+    tmp.path()
+        .join(INSTANCE_ID)
+        .join(format!("{run_id}.markers.redb"))
+}
+
+fn marker_manifest(run_id: &str) -> MarkerManifest {
+    MarkerManifest {
+        run_id: run_id.to_string(),
+        enabled_classes: vec![DataClass::Quote],
+        high_fidelity: false,
+        snapshot_count: 0,
+        hifi_count: 0,
+        gap_count: 0,
+        dict_count: 0,
+        status: RunStatus::Running,
+    }
+}
+
+fn marker_snapshot(marker_seq: u64, event_seq_before: u64) -> DataCursorSnapshot {
+    DataCursorSnapshot {
+        marker_seq,
+        event_seq_before,
+        ts_init: UnixNanos::from(1_700_000_000_000_000_000 + marker_seq),
+        advanced: vec![StreamCursor {
+            slot: 0,
+            ts_init_hi: UnixNanos::from(1_700_000_000_000_000_000 + marker_seq),
+            count: marker_seq,
+        }],
+    }
+}
+
 fn verify_bin(path: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_verify"))
         .arg(path)
@@ -211,6 +243,93 @@ fn binary_clean_run_exits_zero() {
 }
 
 #[rstest]
+fn binary_missing_marker_sidecar_reports_absent_without_error() {
+    let tmp = TempDir::new().expect("tempdir");
+    let run_id = "1700000000-cafe0111";
+    write_sealed_run(&tmp, run_id);
+
+    let output = verify_bin(&run_path(&tmp, run_id));
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    let stderr = String::from_utf8(output.stderr).expect("stderr");
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("clean"), "stdout was: {stdout}");
+    assert!(stdout.contains("markers=absent"), "stdout was: {stdout}");
+    assert!(stderr.is_empty(), "stderr was: {stderr}");
+}
+
+#[rstest]
+fn binary_clean_marker_sidecar_reports_clean_without_error() {
+    let tmp = TempDir::new().expect("tempdir");
+    let run_id = "1700000000-cafe0113";
+    write_sealed_run(&tmp, run_id);
+
+    {
+        let mut marker_backend = RedbMarkerBackend::new(marker_path(&tmp, run_id));
+        marker_backend
+            .open_run(marker_manifest(run_id))
+            .expect("open marker run");
+        let snapshot = marker_snapshot(1, 1);
+        marker_backend
+            .append_snapshot(&snapshot, compute_marker_hash(&snapshot))
+            .expect("append marker snapshot");
+        marker_backend.seal(RunStatus::Ended).expect("seal markers");
+    }
+
+    let output = verify_bin(&run_path(&tmp, run_id));
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    let stderr = String::from_utf8(output.stderr).expect("stderr");
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("clean"), "stdout was: {stdout}");
+    assert!(stdout.contains("markers=clean"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("marker_snapshots_scanned=1"),
+        "stdout was: {stdout}",
+    );
+    assert!(stderr.is_empty(), "stderr was: {stderr}");
+}
+
+#[rstest]
+fn binary_marker_hash_mismatch_exits_corrupt_without_quarantine() {
+    let tmp = TempDir::new().expect("tempdir");
+    let run_id = "1700000000-cafe0112";
+    write_sealed_run(&tmp, run_id);
+
+    {
+        let mut marker_backend = RedbMarkerBackend::new(marker_path(&tmp, run_id));
+        marker_backend
+            .open_run(marker_manifest(run_id))
+            .expect("open marker run");
+        let snapshot = marker_snapshot(1, 1);
+        marker_backend
+            .append_snapshot(&snapshot, [0xAA; 32])
+            .expect("append marker snapshot");
+        marker_backend.seal(RunStatus::Ended).expect("seal markers");
+    }
+
+    let output = verify_bin(&run_path(&tmp, run_id));
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    let stderr = String::from_utf8(output.stderr).expect("stderr");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={stdout} stderr={stderr}",
+    );
+    assert!(stdout.contains("corrupt"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("marker hash mismatch snapshot marker_seq=1"),
+        "stdout was: {stdout}",
+    );
+    assert!(
+        stdout.contains("quarantine=not-performed"),
+        "stdout was: {stdout}",
+    );
+    assert!(stderr.is_empty(), "stderr was: {stderr}");
+}
+
+#[rstest]
 fn binary_hash_mismatch_exits_corrupt_without_quarantine() {
     let tmp = TempDir::new().expect("tempdir");
     let run_id = "1700000000-cafe0102";
@@ -220,7 +339,7 @@ fn binary_hash_mismatch_exits_corrupt_without_quarantine() {
     let path = run_path(&tmp, run_id);
     let mut tampered = build_entry(2, 11);
     tampered.payload = Bytes::from_static(b"\xFF");
-    let bytes = bincode::serde::encode_to_vec(&tampered, standard()).expect("encode");
+    let bytes = codec::encode_to_vec(&tampered).expect("encode");
     {
         let db = redb::Database::create(&path).expect("open redb");
         let txn = db.begin_write().expect("begin write");
@@ -457,7 +576,7 @@ fn open_redb_rejects_missing_run() {
 #[rstest]
 fn manufactured_seq_swap_surfaces_as_finding() {
     // Build a sealed run, then overwrite the bytes at table key=2 with the
-    // bincode-encoded entry whose embedded seq is 99. The hash recomputes
+    // codec-encoded entry whose embedded seq is 99. The hash recomputes
     // correctly because the hash hashes entry.seq=99, so scan_seq returns
     // Ok(Some(entry)) without raising HashMismatch. The verifier must catch
     // the key/embedded-seq divergence.
@@ -468,7 +587,7 @@ fn manufactured_seq_swap_surfaces_as_finding() {
     let path = tmp.path().join(INSTANCE_ID).join(format!("{run_id}.redb"));
     let entries: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("entries");
     let substitute = build_entry(99, 11);
-    let bytes = bincode::serde::encode_to_vec(&substitute, standard()).expect("encode");
+    let bytes = codec::encode_to_vec(&substitute).expect("encode");
     {
         let db = redb::Database::create(&path).expect("open redb");
         let txn = db.begin_write().expect("begin write");
@@ -491,6 +610,89 @@ fn manufactured_seq_swap_surfaces_as_finding() {
                 table_key: 2,
                 embedded_seq: 99,
             }
+        )),
+        "findings was: {:?}",
+        report.findings,
+    );
+}
+
+#[rstest]
+fn corrupt_snapshot_anchor_is_a_finding_not_clean() {
+    // The restore path reads the anchor before tail replay; a run whose anchor fails
+    // to decode must not verify clean and then fail at restore time.
+    let tmp = TempDir::new().expect("tempdir");
+    let run_id = "1700000000-cafe0110";
+    write_sealed_run(&tmp, run_id);
+
+    let path = run_path(&tmp, run_id);
+    let snapshot_anchor: redb::TableDefinition<&str, &[u8]> =
+        redb::TableDefinition::new("snapshot_anchor");
+    {
+        let db = redb::Database::create(&path).expect("open redb");
+        let txn = db.begin_write().expect("begin write");
+        {
+            let mut table = txn.open_table(snapshot_anchor).expect("open table");
+            table
+                .insert("latest", b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".as_slice())
+                .expect("overwrite latest snapshot anchor");
+        }
+        txn.commit().expect("commit overwrite");
+    }
+
+    let verifier = Verifier::open_redb_file(&path).expect("open verifier");
+    let report = verifier.verify().expect("verify");
+
+    assert!(!report.is_clean(), "findings was: {:?}", report.findings);
+    assert!(
+        report.findings.iter().any(|f| matches!(
+            f,
+            VerifyFinding::SnapshotAnchorInvalid { reason } if reason.contains("unreadable")
+        )),
+        "findings was: {:?}",
+        report.findings,
+    );
+}
+
+#[rstest]
+fn snapshot_anchor_past_durable_watermark_is_a_finding() {
+    // A tail-trimmed run whose anchor points past the durable watermark cannot
+    // restore (the reader rejects the plan); the verifier must surface it.
+    let tmp = TempDir::new().expect("tempdir");
+    let run_id = "1700000000-cafe0111";
+    {
+        let mut backend = RedbBackend::new(tmp.path());
+        backend.open_run(manifest(run_id)).expect("open run");
+        backend
+            .append_batch(&[
+                append_with(1, 10, Vec::new()),
+                append_with(2, 11, Vec::new()),
+            ])
+            .expect("append");
+        backend
+            .record_snapshot_anchor(SnapshotAnchor::new(2, "cache://snapshots/2", "blake3:abc"))
+            .expect("record anchor");
+        backend.seal(RunStatus::Ended).expect("seal");
+    }
+
+    let path = run_path(&tmp, run_id);
+    let entries: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("entries");
+    {
+        let db = redb::Database::create(&path).expect("open redb");
+        let txn = db.begin_write().expect("begin write");
+        {
+            let mut table = txn.open_table(entries).expect("open table");
+            table.remove(2_u64).expect("remove seq 2");
+        }
+        txn.commit().expect("commit removal");
+    }
+
+    let verifier = Verifier::open_redb_file(&path).expect("open verifier");
+    let report = verifier.verify().expect("verify");
+
+    assert!(
+        report.findings.iter().any(|f| matches!(
+            f,
+            VerifyFinding::SnapshotAnchorInvalid { reason } if reason.contains("exceeds durable")
         )),
         "findings was: {:?}",
         report.findings,

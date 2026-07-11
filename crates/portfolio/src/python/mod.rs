@@ -18,6 +18,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use indexmap::{IndexMap, IndexSet};
+use nautilus_analysis::snapshot::PortfolioStatistics;
+use nautilus_common::python::config_error_to_pyvalue_err;
 use nautilus_core::python::{to_pynotimplemented_err, to_pyvalue_err};
 use nautilus_model::{
     accounts::AccountAny,
@@ -44,9 +46,9 @@ impl PortfolioConfig {
         min_account_state_logging_interval_ms: Option<u64>,
         debug: Option<bool>,
         snapshot_interval_ms: Option<u64>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let default = Self::default();
-        Self {
+        let config = Self {
             use_mark_prices: use_mark_prices.unwrap_or(default.use_mark_prices),
             use_mark_xrates: use_mark_xrates.unwrap_or(default.use_mark_xrates),
             bar_updates: bar_updates.unwrap_or(default.bar_updates),
@@ -55,7 +57,9 @@ impl PortfolioConfig {
             min_account_state_logging_interval_ms,
             snapshot_interval_ms,
             debug: debug.unwrap_or(default.debug),
-        }
+        };
+        config.validate().map_err(config_error_to_pyvalue_err)?;
+        Ok(config)
     }
 
     fn __repr__(&self) -> String {
@@ -423,6 +427,11 @@ impl PyPortfolio {
     fn py_is_completely_flat(&self, account_id: Option<AccountId>) -> bool {
         self.is_completely_flat_for_account(account_id.as_ref())
     }
+
+    #[pyo3(name = "statistics")]
+    fn py_statistics(&self) -> PortfolioStatistics {
+        self.0.borrow().statistics()
+    }
 }
 
 /// Loaded as `nautilus_pyo3.portfolio`.
@@ -496,14 +505,14 @@ impl PyPortfolio {
     where
         F: FnMut(&mut Portfolio, &Venue) -> IndexMap<Currency, Money>,
     {
-        let mut totals: IndexMap<Currency, f64> = IndexMap::new();
+        let mut totals: IndexMap<Currency, Money> = IndexMap::new();
         let mut portfolio = self.0.borrow_mut();
 
         for venue in venues {
             add_money_map(&mut totals, query(&mut portfolio, &venue));
         }
 
-        currency_totals_to_pydict(py, totals)
+        currency_money_map_to_pydict(py, totals)
     }
 
     fn aggregate_net_exposures(
@@ -521,7 +530,7 @@ impl PyPortfolio {
             };
         }
 
-        let mut totals: IndexMap<Currency, f64> = IndexMap::new();
+        let mut totals: IndexMap<Currency, Money> = IndexMap::new();
         let portfolio = self.0.borrow();
         for venue in venues {
             let Some(exposures) = portfolio.net_exposures(&venue, account_id) else {
@@ -530,7 +539,7 @@ impl PyPortfolio {
             add_money_map(&mut totals, exposures);
         }
 
-        Ok(Some(currency_totals_to_pydict(py, totals)?))
+        Ok(Some(currency_money_map_to_pydict(py, totals)?))
     }
 
     fn account_equity(
@@ -597,19 +606,6 @@ fn currency_money_map_to_pydict(
     Ok(dict.unbind())
 }
 
-fn currency_totals_to_pydict(
-    py: Python<'_>,
-    totals: IndexMap<Currency, f64>,
-) -> PyResult<Py<PyDict>> {
-    currency_money_map_to_pydict(
-        py,
-        totals
-            .into_iter()
-            .map(|(currency, amount)| (currency, Money::new(amount, currency)))
-            .collect(),
-    )
-}
-
 fn instrument_money_map_to_pydict(
     py: Python<'_>,
     map: IndexMap<InstrumentId, Money>,
@@ -621,9 +617,12 @@ fn instrument_money_map_to_pydict(
     Ok(dict.unbind())
 }
 
-fn add_money_map(totals: &mut IndexMap<Currency, f64>, map: IndexMap<Currency, Money>) {
+fn add_money_map(totals: &mut IndexMap<Currency, Money>, map: IndexMap<Currency, Money>) {
     for (currency, money) in map {
-        *totals.entry(currency).or_insert(0.0) += money.as_f64();
+        totals
+            .entry(currency)
+            .and_modify(|total| *total = *total + money)
+            .or_insert(money);
     }
 }
 
