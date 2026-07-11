@@ -70,7 +70,7 @@ jobs:
 
       - name: Create or reuse PR from develop to main
         env:
-          GH_TOKEN: ${{ env.SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
