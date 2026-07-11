@@ -4,6 +4,9 @@ permissions: # Principle of least privilege
   contents: read
   actions: read
 
+env:
+  NIGHTLY_SYNC_TOKEN: ${{ secrets.NIGHTLY_TOKEN || secrets.PAT_TOKEN || github.token }}
+
 on:
   push:
     branches: [nightly-merge-test]
@@ -13,7 +16,9 @@ on:
 
 jobs:
   check-develop-status:
-    if: github.repository == 'nautechsystems/nautilus_trader'
+    if: >-
+      github.repository == 'nautechsystems/nautilus_trader' ||
+      github.repository == 'arif-b-khan/nautilus_trader'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,7 +39,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-          token: ${{ secrets.NIGHTLY_TOKEN }}
+          token: ${{ env.NIGHTLY_SYNC_TOKEN }}
           fetch-depth: 0 # Fetch all history for all tags and branches
 
       - name: Fetch develop branch workflows
@@ -44,7 +49,7 @@ jobs:
           url="https://api.github.com/repos/nautechsystems/nautilus_trader/actions/runs?branch=develop&per_page=50"
           echo "Fetching workflows from: $url"
           if ! curl -sS --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 5 --max-time 60 \
-               -H "Authorization: token ${{ secrets.NIGHTLY_TOKEN }}" "$url" > workflow_runs.json; then
+               -H "Authorization: token $NIGHTLY_SYNC_TOKEN" "$url" > workflow_runs.json; then
               echo "Failed to fetch workflows, exiting"
               exit 1
           fi
@@ -119,7 +124,8 @@ jobs:
   nightly-merge:
     needs: check-develop-status
     if: >-
-      github.repository == 'nautechsystems/nautilus_trader' &&
+      (github.repository == 'nautechsystems/nautilus_trader' ||
+       github.repository == 'arif-b-khan/nautilus_trader') &&
       needs.check-develop-status.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +142,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: true
-          token: ${{ secrets.NIGHTLY_TOKEN }}
+          token: ${{ env.NIGHTLY_SYNC_TOKEN }}
           fetch-depth: 0 # Fetch all history for all tags and branches
 
       - name: Configure Git user
