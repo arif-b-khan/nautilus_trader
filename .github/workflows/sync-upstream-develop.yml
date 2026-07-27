@@ -26,6 +26,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
           persist-credentials: true
 
       - name: Configure Git user
@@ -58,11 +59,12 @@ jobs:
 
       - name: Create or reuse PR from develop to main
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
 
           existing_pr="$(gh pr list \
+            --repo "${{ github.repository }}" \
             --base "${MAIN_BRANCH}" \
             --head "${DEVELOP_BRANCH}" \
             --state open \
@@ -71,6 +73,7 @@ jobs:
 
           if [ -z "${existing_pr}" ]; then
             gh pr create \
+              --repo "${{ github.repository }}" \
               --base "${MAIN_BRANCH}" \
               --head "${DEVELOP_BRANCH}" \
               --title "Sync ${DEVELOP_BRANCH} into ${MAIN_BRANCH}" \
