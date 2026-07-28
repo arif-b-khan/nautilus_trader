@@ -119,6 +119,10 @@ class OpenAlgoHttpClient:
         trigger_price: str = "0",
         disclosed_quantity: str = "0",
     ) -> dict[str, Any]:
+        if trigger_price not in {"0", ""}:
+            raise ValueError("trigger_price is not supported by OpenAlgo Rust SDK v1.0.5")
+        if disclosed_quantity not in {"0", ""}:
+            raise ValueError("disclosed_quantity is not supported by OpenAlgo Rust SDK v1.0.5")
         del trigger_price, disclosed_quantity
         return self._decode(
             await self._client.modify_order(
