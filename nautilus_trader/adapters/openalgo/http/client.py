@@ -87,6 +87,8 @@ class OpenAlgoHttpClient:
         trigger_price: str = "0",
         disclosed_quantity: str = "0",
     ) -> dict[str, Any]:
+        if disclosed_quantity not in {"0", ""}:
+            raise ValueError("disclosed_quantity is not supported by OpenAlgo Rust SDK v1.0.5")
         del disclosed_quantity  # OpenAlgo Rust SDK v1.0.5 does not expose this optional field.
         return self._decode(
             await self._client.place_order(
