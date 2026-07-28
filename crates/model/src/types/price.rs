@@ -59,7 +59,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::fixed::{
     FIXED_PRECISION, FIXED_SCALAR, check_fixed_precision, mantissa_exponent_to_fixed_i128,
-    mantissa_exponent_to_raw_checked, raw_scales_match,
+    mantissa_exponent_to_raw_checked, raw_scales_match, scaled_raw_to_decimal,
 };
 #[cfg(feature = "high-precision")]
 use super::fixed::{PRECISION_DIFF_SCALAR, f64_to_fixed_i128, fixed_i128_to_f64};
@@ -448,7 +448,7 @@ impl Price {
             clippy::cast_lossless,
             reason = "cast is real when PriceRaw is i64, no-op when i128"
         )]
-        Decimal::from_i128_with_scale(rescaled_raw as i128, u32::from(self.precision))
+        scaled_raw_to_decimal(rescaled_raw as i128, self.precision)
     }
 
     /// Returns a formatted string representation of this instance.
@@ -1580,6 +1580,18 @@ mod tests {
         assert_eq!(price.as_f64(), 0.0);
     }
 
+    #[cfg(feature = "high-precision")]
+    #[rstest]
+    #[case(PRICE_RAW_MAX, dec!(17014118346046))]
+    #[case(PRICE_RAW_MIN, dec!(-17014118346046))]
+    fn test_as_decimal_above_decimal_mantissa(#[case] raw: PriceRaw, #[case] expected: Decimal) {
+        // Regression: a precision-16 price above roughly 7.92e12 rescales to a raw value beyond
+        // `Decimal`'s 96-bit mantissa, which used to panic during conversion.
+        let price = Price::from_raw(raw, 16);
+
+        assert_eq!(price.as_decimal(), expected);
+    }
+
     #[rstest]
     fn test_from_mantissa_exponent_checked_exact_precision() {
         let price = Price::from_mantissa_exponent_checked(12345, -2, 2).unwrap();
@@ -1712,9 +1724,9 @@ mod property_tests {
 
     const DECIMAL_MAX_MANTISSA: i128 = 79_228_162_514_264_337_593_543_950_335;
 
-    #[expect(
+    #[allow(
         clippy::useless_conversion,
-        reason = "PriceRaw is i64 or i128 depending on feature"
+        reason = "PriceRaw is i64 or i128 depending on feature; the conversion is only useless in high-precision builds"
     )]
     fn decimal_compatible(raw: PriceRaw, precision: u8) -> bool {
         if precision > crate::types::fixed::MAX_FLOAT_PRECISION {

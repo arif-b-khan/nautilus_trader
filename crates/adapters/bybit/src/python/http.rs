@@ -481,7 +481,7 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - Credentials are missing.
     /// - The request fails.
-    /// - Called between 04:00-05:30 UTC (interest calculation window).
+    /// - Called during the hourly interest-calculation window (mm:04:00-mm:05:30 UTC each hour).
     /// - Insufficient spot balance for repayment.
     #[pyo3(name = "repay_spot_borrow")]
     #[pyo3(signature = (coin, amount=None))]
@@ -496,6 +496,43 @@ impl BybitHttpClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client
                 .repay_spot_borrow(&coin, amount)
+                .await
+                .map_err(to_pyvalue_err)?;
+
+            Python::attach(|py| Ok(py.None()))
+        })
+    }
+
+    /// Repays spot borrows for a specific coin, converting other assets if required.
+    ///
+    /// Unlike `Self.repay_spot_borrow`, this uses the venue's manual repay endpoint,
+    /// which may draw on other holdings when the debt coin's spot balance is insufficient.
+    ///
+    /// # Parameters
+    ///
+    /// - `coin`: The coin to repay (e.g., "BTC", "ETH")
+    /// - `amount`: Optional amount to repay. If None, repays all outstanding borrows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Credentials are missing.
+    /// - The request fails.
+    /// - Called during the hourly interest-calculation window (mm:04:00-mm:05:30 UTC each hour).
+    /// - Insufficient balance for repayment.
+    #[pyo3(name = "repay_spot_borrow_with_conversion")]
+    #[pyo3(signature = (coin, amount=None))]
+    fn py_repay_spot_borrow_with_conversion<'py>(
+        &self,
+        py: Python<'py>,
+        coin: String,
+        amount: Option<Quantity>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client
+                .repay_spot_borrow_with_conversion(&coin, amount)
                 .await
                 .map_err(to_pyvalue_err)?;
 
@@ -535,10 +572,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|inst| instrument_any_to_pyobject(py, inst))
                     .collect();
-                let pylist = PyList::new(py, py_instruments?)
-                    .unwrap()
-                    .into_any()
-                    .unbind();
+                let pylist = PyList::new(py, py_instruments?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -611,7 +645,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|ticker| Py::new(py, ticker))
                     .collect();
-                let pylist = PyList::new(py, py_tickers?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_tickers?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -839,7 +873,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|report| report.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_reports?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_reports?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -925,7 +959,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|trade| trade.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_trades?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_trades?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -967,10 +1001,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|funding_rate| funding_rate.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_funding_rates?)
-                    .unwrap()
-                    .into_any()
-                    .unbind();
+                let pylist = PyList::new(py, py_funding_rates?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -1010,7 +1041,7 @@ impl BybitHttpClient {
                 .await
                 .map_err(to_pyvalue_err)?;
 
-            Python::attach(|py| Ok(deltas.into_py_any(py).unwrap()))
+            Python::attach(|py| deltas.into_py_any(py))
         })
     }
 
@@ -1057,7 +1088,7 @@ impl BybitHttpClient {
             Python::attach(|py| {
                 let py_bars: PyResult<Vec<_>> =
                     bars.into_iter().map(|bar| bar.into_py_any(py)).collect();
-                let pylist = PyList::new(py, py_bars?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_bars?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -1096,7 +1127,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|rate| Py::new(py, rate))
                     .collect();
-                let pylist = PyList::new(py, py_fee_rates?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_fee_rates?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -1177,7 +1208,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|report| report.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_reports?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_reports?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -1220,7 +1251,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|report| report.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_reports?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_reports?)?.into_any().unbind();
                 Ok(pylist)
             })
         })
@@ -1259,7 +1290,7 @@ impl BybitHttpClient {
                     .into_iter()
                     .map(|report| report.into_py_any(py))
                     .collect();
-                let pylist = PyList::new(py, py_reports?).unwrap().into_any().unbind();
+                let pylist = PyList::new(py, py_reports?)?.into_any().unbind();
                 Ok(pylist)
             })
         })

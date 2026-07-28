@@ -15,10 +15,11 @@
 
 //! Reconciliation report generation for the Polymarket execution client.
 
+use ahash::AHashMap;
 use anyhow::Context;
 use nautilus_core::{UnixNanos, collections::AtomicMap, time::AtomicTime};
 use nautilus_model::{
-    enums::{LiquiditySide, PositionSideSpecified},
+    enums::{LiquiditySide, OrderStatus, PositionSideSpecified},
     identifiers::{AccountId, ClientId, InstrumentId, Venue, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
@@ -36,8 +37,8 @@ use super::{
 };
 use crate::{
     common::{
-        consts::{DUST_POSITION_THRESHOLD, USDC_DECIMALS},
-        enums::PolymarketLiquiditySide,
+        consts::{DUST_POSITION_THRESHOLD, DUST_SNAP_THRESHOLD_DEC, USDC_DECIMALS},
+        enums::{PolymarketLiquiditySide, PolymarketTradeStatus},
     },
     http::{
         clob::PolymarketClobHttpClient,
@@ -69,6 +70,10 @@ pub(crate) fn build_fill_reports_from_trades(
     let mut filtered = 0usize;
 
     for trade in trades {
+        if trade.status != PolymarketTradeStatus::Confirmed {
+            continue;
+        }
+
         let is_maker = trade.trader_side == PolymarketLiquiditySide::Maker;
 
         if is_maker {
@@ -224,7 +229,7 @@ pub(crate) fn build_position_reports(
     positions
         .iter()
         .filter(|p| {
-            if p.size > 0.0 && p.size < DUST_POSITION_THRESHOLD {
+            if p.size > Decimal::ZERO && p.size < DUST_POSITION_THRESHOLD {
                 log::debug!(
                     "Filtering dust position: {}-{}, size={}",
                     p.condition_id,
@@ -234,21 +239,32 @@ pub(crate) fn build_position_reports(
             }
             p.size >= DUST_POSITION_THRESHOLD
         })
-        .map(|p| {
+        .filter_map(|p| {
             let instrument_id =
                 InstrumentId::from(format!("{}-{}.POLYMARKET", p.condition_id, p.asset).as_str());
-            let avg_px_open = p.avg_price.and_then(|px| Decimal::try_from(px).ok());
-            PositionStatusReport::new(
+            let quantity = match Quantity::from_decimal_dp(p.size, USDC_DECIMALS as u8) {
+                Ok(quantity) => quantity,
+                Err(e) => {
+                    log::warn!(
+                        "Skipping invalid Data API position {}-{} size {}: {e}",
+                        p.condition_id,
+                        p.asset,
+                        p.size,
+                    );
+                    return None;
+                }
+            };
+            Some(PositionStatusReport::new(
                 account_id,
                 instrument_id,
                 PositionSideSpecified::Long,
-                Quantity::new(p.size, USDC_DECIMALS as u8),
+                quantity,
                 ts,
                 ts,
                 None,
                 None,
-                avg_px_open,
-            )
+                p.avg_price,
+            ))
         })
         .collect()
 }
@@ -332,6 +348,8 @@ pub(crate) async fn generate_mass_status(
         );
     }
 
+    cap_order_reports_to_confirmed_fills(&mut order_reports, &fill_reports);
+
     let mut mass_status = ExecutionMassStatus::new(client_id, ctx.account_id, venue, ts_init, None);
 
     mass_status.add_order_reports(order_reports);
@@ -339,4 +357,168 @@ pub(crate) async fn generate_mass_status(
     mass_status.add_fill_reports(fill_reports);
 
     Ok(Some(mass_status))
+}
+
+fn cap_order_reports_to_confirmed_fills(
+    order_reports: &mut [OrderStatusReport],
+    fill_reports: &[FillReport],
+) {
+    let confirmed_by_order = confirmed_filled_quantities(fill_reports);
+
+    for report in order_reports {
+        let local_filled = Quantity::zero(report.quantity.precision);
+        cap_order_report_filled_qty(
+            report,
+            local_filled,
+            confirmed_by_order.get(&report.venue_order_id).copied(),
+        );
+    }
+}
+
+pub(crate) fn confirmed_filled_quantities(
+    fill_reports: &[FillReport],
+) -> AHashMap<VenueOrderId, Decimal> {
+    let mut confirmed_by_order = AHashMap::new();
+    for fill in fill_reports {
+        *confirmed_by_order.entry(fill.venue_order_id).or_default() += fill.last_qty.as_decimal();
+    }
+
+    confirmed_by_order
+}
+
+pub(crate) fn cap_order_report_filled_qty(
+    report: &mut OrderStatusReport,
+    local_filled: Quantity,
+    confirmed_filled: Option<Decimal>,
+) {
+    let confirmed_filled = confirmed_filled
+        .and_then(|qty| Quantity::from_decimal_dp(qty, report.quantity.precision).ok())
+        .unwrap_or_else(|| Quantity::zero(report.quantity.precision));
+    let capped = report.filled_qty.min(local_filled.max(confirmed_filled));
+    report.filled_qty = capped;
+    normalize_terminal_order_report_quantity(report);
+}
+
+pub(crate) fn normalize_terminal_order_report_quantity(report: &mut OrderStatusReport) {
+    if report.order_status != OrderStatus::Filled
+        || report.filled_qty.is_zero()
+        || report.filled_qty >= report.quantity
+    {
+        return;
+    }
+
+    let leaves = report.quantity.as_decimal() - report.filled_qty.as_decimal();
+    if leaves < DUST_SNAP_THRESHOLD_DEC {
+        log::debug!(
+            "Normalizing terminal order report {} quantity from {} to confirmed fills {}",
+            report.venue_order_id,
+            report.quantity,
+            report.filled_qty,
+        );
+        report.quantity = report.filled_qty;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_model::{
+        enums::{LiquiditySide, OrderSide, OrderStatus, OrderType, TimeInForce},
+        identifiers::TradeId,
+        types::{Money, Price},
+    };
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn caps_order_report_to_confirmed_companion_fills() {
+        let account_id = AccountId::from("POLY-001");
+        let instrument_id = InstrumentId::from("TEST.POLYMARKET");
+        let venue_order_id = VenueOrderId::from("V-1");
+        let mut reports = vec![OrderStatusReport::new(
+            account_id,
+            instrument_id,
+            None,
+            venue_order_id,
+            OrderSide::Buy,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            OrderStatus::PartiallyFilled,
+            Quantity::from("10.0000"),
+            Quantity::from("10.0000"),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            None,
+        )];
+        let fills = vec![FillReport::new(
+            account_id,
+            instrument_id,
+            venue_order_id,
+            TradeId::from("T-1"),
+            OrderSide::Buy,
+            Quantity::from("4.0000"),
+            Price::from("0.5000"),
+            Money::new(0.0, Currency::pUSD()),
+            LiquiditySide::Taker,
+            None,
+            None,
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            None,
+        )];
+
+        cap_order_reports_to_confirmed_fills(&mut reports, &fills);
+
+        assert_eq!(reports[0].filled_qty, Quantity::from("4.0000"));
+    }
+
+    #[rstest]
+    #[case::below_threshold("99.995", "99.995")]
+    #[case::at_threshold("99.990", "100.000")]
+    fn normalizes_confirmed_dust_residual_to_order_quantity(
+        #[case] confirmed: &str,
+        #[case] expected_quantity: &str,
+    ) {
+        let account_id = AccountId::from("POLY-001");
+        let instrument_id = InstrumentId::from("TEST.POLYMARKET");
+        let venue_order_id = VenueOrderId::from("V-DUST");
+        let mut reports = vec![OrderStatusReport::new(
+            account_id,
+            instrument_id,
+            None,
+            venue_order_id,
+            OrderSide::Buy,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            OrderStatus::Filled,
+            Quantity::from("100.000"),
+            Quantity::from("100.000"),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            None,
+        )];
+        let fills = vec![FillReport::new(
+            account_id,
+            instrument_id,
+            venue_order_id,
+            TradeId::from("T-DUST"),
+            OrderSide::Buy,
+            Quantity::from(confirmed),
+            Price::from("0.5000"),
+            Money::zero(Currency::pUSD()),
+            LiquiditySide::Taker,
+            None,
+            None,
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            None,
+        )];
+
+        cap_order_reports_to_confirmed_fills(&mut reports, &fills);
+
+        assert_eq!(reports[0].quantity, Quantity::from(expected_quantity));
+        assert_eq!(reports[0].filled_qty, Quantity::from(confirmed));
+    }
 }

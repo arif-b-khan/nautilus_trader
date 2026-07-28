@@ -42,6 +42,7 @@ use nautilus_okx::{
     config::OKXDataClientConfig,
     data::OKXDataClient,
 };
+use nautilus_testkit::events::{collect_data_events_until_response, drain_data_events};
 use rstest::rstest;
 use serde_json::{Value, json};
 
@@ -154,18 +155,6 @@ fn create_test_data_client(
     (client, rx)
 }
 
-async fn drain_data_events(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
-    timeout: Duration,
-) -> Vec<DataEvent> {
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-        events.push(event);
-    }
-    events
-}
-
 fn request_instruments() -> RequestInstruments {
     RequestInstruments::new(
         None,
@@ -232,11 +221,14 @@ async fn test_request_instruments_includes_spreads_when_enabled() {
     let addr = start_test_server(state.clone()).await;
     let (client, mut rx) = create_test_data_client(addr, true);
 
+    let request = request_instruments();
+    let request_id = request.request_id;
     client
-        .request_instruments(request_instruments())
+        .request_instruments(request)
         .expect("request_instruments");
 
-    let events = drain_data_events(&mut rx, Duration::from_secs(5)).await;
+    let events =
+        collect_data_events_until_response(&mut rx, request_id, Duration::from_secs(5)).await;
     let response = instruments_response(&events);
     let spread_ids = response
         .data
@@ -274,11 +266,14 @@ async fn test_request_instruments_continues_when_spread_endpoint_fails() {
     let addr = start_test_server(state.clone()).await;
     let (client, mut rx) = create_test_data_client(addr, true);
 
+    let request = request_instruments();
+    let request_id = request.request_id;
     client
-        .request_instruments(request_instruments())
+        .request_instruments(request)
         .expect("request_instruments");
 
-    let events = drain_data_events(&mut rx, Duration::from_secs(5)).await;
+    let events =
+        collect_data_events_until_response(&mut rx, request_id, Duration::from_secs(5)).await;
     let response = instruments_response(&events);
     let spread_count = response
         .data
@@ -304,11 +299,14 @@ async fn test_request_instrument_returns_spread_when_enabled() {
     let addr = start_test_server(state.clone()).await;
     let (client, mut rx) = create_test_data_client(addr, true);
 
+    let request = request_instrument("BTC-USDT_BTC-USDT-SWAP.OKX");
+    let request_id = request.request_id;
     client
-        .request_instrument(request_instrument("BTC-USDT_BTC-USDT-SWAP.OKX"))
+        .request_instrument(request)
         .expect("request_instrument");
 
-    let events = drain_data_events(&mut rx, Duration::from_secs(5)).await;
+    let events =
+        collect_data_events_until_response(&mut rx, request_id, Duration::from_secs(5)).await;
     let response = instrument_response(&events).expect("spread response must be emitted");
     let spread_queries = state.spread_queries.lock().await;
 
@@ -338,6 +336,7 @@ async fn test_request_instrument_emits_no_spread_when_disabled() {
         .request_instrument(request_instrument("BTC-USDT_BTC-USDT-SWAP.OKX"))
         .expect("request_instrument");
 
+    // This path emits no response, so retain a bounded absence window.
     let events = drain_data_events(&mut rx, Duration::from_secs(1)).await;
     let spread_queries = state.spread_queries.lock().await;
 

@@ -38,7 +38,10 @@ python = [
   "pyo3",
   "pyo3-stub-gen",
 ]
-high-precision = ["nautilus-model/high-precision"]
+high-precision = [
+  "nautilus-model/high-precision",
+  "nautilus-serialization/high-precision",
+]
 
 [package.metadata.docs.rs]
 # Python docs depend on the local pyo3-stub-gen patch for now, which published crates do not carry
@@ -79,3 +82,4 @@ axum = { workspace = true }
 rstest = { workspace = true }
 rust_decimal_macros = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

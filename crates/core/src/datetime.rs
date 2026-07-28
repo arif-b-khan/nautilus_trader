@@ -686,42 +686,30 @@ pub fn subtract_n_years_nanos(unix_nanos: UnixNanos, n: u32) -> anyhow::Result<U
     Ok(UnixNanos::from(nanos))
 }
 
-/// Returns the last valid day of `(year, month)`.
-///
-/// Returns `None` if `month` is not in the range 1..=12.
-#[must_use]
-pub const fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
-    // Validate month range 1-12
-    if month < 1 || month > 12 {
-        return None;
-    }
-
-    // February leap-year logic
-    Some(match month {
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        4 | 6 | 9 | 11 => 30,
-        _ => 31, // January, March, May, July, August, October, December
-    })
-}
-
-/// Basic leap-year check
-#[must_use]
-pub const fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
 /// Convert optional `DateTime` to optional `UnixNanos` timestamp.
 pub fn datetime_to_unix_nanos(value: Option<DateTime<Utc>>) -> Option<UnixNanos> {
     value
         .and_then(|dt| dt.timestamp_nanos_opt())
         .and_then(|nanos| u64::try_from(nanos).ok())
         .map(UnixNanos::from)
+}
+
+/// Converts a `DateTime<Utc>` to `UnixNanos`.
+///
+/// Unlike `UnixNanos::from(DateTime<Utc>)` which panics, this returns an error.
+///
+/// # Errors
+///
+/// Returns an error if the timestamp is before the UNIX epoch or out of range for `UnixNanos`.
+pub fn try_datetime_to_unix_nanos(value: DateTime<Utc>) -> anyhow::Result<UnixNanos> {
+    let nanos = value
+        .timestamp_nanos_opt()
+        .ok_or_else(|| anyhow::anyhow!("DateTime timestamp out of range for UnixNanos"))?;
+
+    let nanos = u64::try_from(nanos)
+        .map_err(|_| anyhow::anyhow!("DateTime timestamp cannot be negative: {nanos}"))?;
+
+    Ok(UnixNanos::from(nanos))
 }
 
 #[cfg(test)]
@@ -833,13 +821,6 @@ mod tests {
     fn test_secs_to_nanos_negative_infinity_errors() {
         let result = secs_to_nanos(f64::NEG_INFINITY);
         assert!(result.is_err());
-    }
-
-    #[rstest]
-    #[case(2024, 0)] // Month below range
-    #[case(2024, 13)] // Month above range
-    fn test_last_day_of_month_invalid_month(#[case] year: i32, #[case] month: u32) {
-        assert!(last_day_of_month(year, month).is_none());
     }
 
     #[rstest]
@@ -1128,26 +1109,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case(2024, 2, 29)] // Leap year February
-    #[case(2023, 2, 28)] // Non-leap year February
-    #[case(2024, 12, 31)] // December
-    #[case(2023, 11, 30)] // November
-    fn test_last_day_of_month(#[case] year: i32, #[case] month: u32, #[case] expected: u32) {
-        let result = last_day_of_month(year, month).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[rstest]
-    #[case(2024, true)] // Leap year divisible by 4
-    #[case(1900, false)] // Not leap year, divisible by 100 but not 400
-    #[case(2000, true)] // Leap year, divisible by 400
-    #[case(2023, false)] // Non-leap year
-    fn test_is_leap_year(#[case] year: i32, #[case] expected: bool) {
-        let result = is_leap_year(year);
-        assert_eq!(result, expected);
-    }
-
-    #[rstest]
     #[case("1970-01-01T00:00:00.000000000Z", 0)] // Unix epoch
     #[case("1970-01-01T00:00:00.000000001Z", 1)] // 1 nanosecond
     #[case("1970-01-01T00:00:00.001000000Z", 1_000_000)] // 1 millisecond
@@ -1244,6 +1205,34 @@ mod tests {
         let dt = Utc.timestamp_opt(0, 1_000).unwrap(); // 1 microsecond = 1000 nanos
         let result = datetime_to_unix_nanos(Some(dt));
         assert_eq!(result, Some(UnixNanos::from(1_000)));
+    }
+
+    #[rstest]
+    fn test_try_datetime_to_unix_nanos_valid() {
+        let dt = Utc.timestamp_opt(0, 1_000).unwrap();
+        assert_eq!(
+            try_datetime_to_unix_nanos(dt).unwrap(),
+            UnixNanos::from(1_000)
+        );
+    }
+
+    #[rstest]
+    fn test_try_datetime_to_unix_nanos_before_epoch_errors() {
+        let before_epoch = Utc.with_ymd_and_hms(1969, 12, 31, 23, 59, 59).unwrap();
+        let err = try_datetime_to_unix_nanos(before_epoch).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be negative"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[rstest]
+    fn test_try_datetime_to_unix_nanos_out_of_range_errors() {
+        let err = try_datetime_to_unix_nanos(DateTime::<Utc>::MAX_UTC).unwrap_err();
+        assert!(
+            err.to_string().contains("out of range"),
+            "unexpected error: {err}"
+        );
     }
 
     #[rstest]

@@ -16,7 +16,7 @@
 //! Integration tests for the Hyperliquid WebSocket execution dispatch.
 //!
 //! Covers the two-tier routing contract from
-//! `docs/developer_guide/adapters.md` lines 1232-1296 plus the GH-3827
+//! `docs/developer_guide/adapters.md#tracked-and-external-execution-updates` plus the GH-3827
 //! cancel-replace handling:
 //!
 //! - Tracked orders emit typed [`OrderEventAny`] events (`OrderAccepted`,
@@ -286,6 +286,67 @@ fn test_dispatch_rejected_tracked_emits_rejected_and_cleans_up() {
     assert_event_types(&events, &["Rejected"]);
     assert!(state.lookup_identity(&cid).is_none());
     assert!(state.filled_orders.contains(&cid));
+}
+
+#[rstest]
+fn test_dispatch_post_only_rejection_sets_due_post_only() {
+    let (emitter, mut rx) = test_emitter();
+    let state = Arc::new(WsDispatchState::new());
+    let cid = ClientOrderId::new("O-POST-REJECT");
+    state.register_identity(cid, identity(OrderType::Limit));
+
+    let report = make_status_report(
+        Some("O-POST-REJECT"),
+        "v-post-reject",
+        OrderStatus::Rejected,
+        Some("56730.0"),
+        "0.00020",
+    )
+    .with_post_only(true)
+    .with_cancel_reason("Post only order would have immediately matched".to_string());
+    dispatch_order_event(&report, &state, &emitter, UnixNanos::default());
+
+    let events = drain_events(&mut rx);
+    let ExecutionEvent::Order(OrderEventAny::Rejected(rejected)) = &events[0] else {
+        panic!("expected OrderRejected, received {:?}", events[0]);
+    };
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        rejected.reason.as_str(),
+        "Post only order would have immediately matched",
+    );
+    assert!(rejected.due_post_only);
+}
+
+#[rstest]
+fn test_dispatch_passive_ioc_rejection_preserves_venue_reason() {
+    let (emitter, mut rx) = test_emitter();
+    let state = Arc::new(WsDispatchState::new());
+    let cid = ClientOrderId::new("O-IOC-REJECT");
+    state.register_identity(cid, identity(OrderType::Limit));
+
+    let report = make_status_report(
+        Some("O-IOC-REJECT"),
+        "v-ioc-reject",
+        OrderStatus::Rejected,
+        Some("56730.0"),
+        "0.00020",
+    )
+    .with_cancel_reason("Order could not immediately match against any resting orders".to_string());
+    dispatch_order_event(&report, &state, &emitter, UnixNanos::default());
+
+    let events = drain_events(&mut rx);
+    let ExecutionEvent::Order(OrderEventAny::Rejected(rejected)) = &events[0] else {
+        panic!("expected OrderRejected, received {:?}", events[0]);
+    };
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        rejected.reason.as_str(),
+        "Order could not immediately match against any resting orders",
+    );
+    assert!(!rejected.due_post_only);
 }
 
 #[rstest]

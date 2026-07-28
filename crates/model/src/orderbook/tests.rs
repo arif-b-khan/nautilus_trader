@@ -38,7 +38,11 @@ use crate::{
         own::{OwnBookLadder, OwnBookLevel, OwnOrderBook},
     },
     stubs::TestDefault,
-    types::{Price, Quantity},
+    types::{
+        Price, Quantity,
+        fixed::FIXED_PRECISION,
+        quantity::{QUANTITY_RAW_MAX, QuantityRaw},
+    },
 };
 
 #[rstest]
@@ -237,7 +241,7 @@ fn test_book_midpoint_with_orders() {
 }
 
 #[rstest]
-fn test_book_get_price_for_quantity_no_market() {
+fn test_book_get_avg_px_for_quantity_no_market() {
     let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
     let book = OrderBook::new(instrument_id, BookType::L2_MBP);
 
@@ -259,7 +263,7 @@ fn test_book_get_quantity_for_price_no_market() {
 }
 
 #[rstest]
-fn test_book_get_price_for_quantity() {
+fn test_book_get_avg_px_for_quantity() {
     let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
     let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
 
@@ -302,6 +306,46 @@ fn test_book_get_price_for_quantity() {
         book.get_avg_px_for_quantity(qty, OrderSide::Sell),
         0.996_666_666_666_666_7
     );
+}
+
+#[rstest]
+fn test_book_get_avg_px_for_quantity_exact_accumulation() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+    let size = Quantity::from_raw(1, FIXED_PRECISION);
+    let ask1 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("9007199253.999000000"),
+        size,
+        1,
+    );
+    let ask2 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("9007199253.999000001"),
+        size,
+        2,
+    );
+    book.add(ask1, 0, 1, 1.into());
+    book.add(ask2, 0, 2, 2.into());
+
+    let result =
+        book.get_avg_px_for_quantity(Quantity::from_raw(2, FIXED_PRECISION), OrderSide::Buy);
+
+    assert_eq!(result.to_bits(), 4_756_019_973_358_353_908);
+}
+
+#[cfg(feature = "high-precision")]
+#[rstest]
+fn test_book_get_avg_px_for_quantity_max_raw_size() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+    let size = Quantity::from_raw(QUANTITY_RAW_MAX, FIXED_PRECISION);
+    let ask = BookOrder::new(OrderSide::Sell, Price::from("1.0"), size, 1);
+    book.add(ask, 0, 1, 1.into());
+
+    let result = book.get_avg_px_for_quantity(size, OrderSide::Buy);
+
+    assert_eq!(result, 1.0);
 }
 
 #[rstest]
@@ -8056,9 +8100,9 @@ fn test_deltas_to_quotes_suppresses_duplicate_bbo() {
             2,
             2000,
         ),
-        // Add deeper bid — BBO unchanged
+        // Add deeper bid - BBO unchanged
         make_delta(id, BookAction::Add, OrderSide::Buy, "98.00", "5", 3, 3000),
-        // Add deeper ask — BBO unchanged
+        // Add deeper ask - BBO unchanged
         make_delta(id, BookAction::Add, OrderSide::Sell, "102.00", "5", 4, 4000),
     ];
 
@@ -8132,7 +8176,7 @@ fn test_deltas_to_quotes_emits_on_cancel_changes_bbo() {
             3,
             2000,
         ),
-        // Cancel best bid — BBO changes to 98.00
+        // Cancel best bid - BBO changes to 98.00
         make_delta(
             id,
             BookAction::Delete,
@@ -8518,6 +8562,36 @@ fn test_book_get_levels_for_price_buy_crosses_two_levels() {
             (Price::from("1.002"), Quantity::from("20.0")),
         ]
     );
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_preserves_raw_size() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+    let price = Price::from("1.001");
+    let size = Quantity::from_raw(9_007_199_253_999_999_999 as QuantityRaw, FIXED_PRECISION);
+    let ask = BookOrder::new(OrderSide::Sell, price, size, 0);
+    book.add(ask, 0, 1, 1.into());
+
+    let result = book.get_all_crossed_levels(OrderSide::Buy, price, FIXED_PRECISION);
+
+    assert_eq!(result, vec![(price, size)]);
+}
+
+#[cfg(not(feature = "high-precision"))]
+#[rstest]
+#[should_panic(expected = "Overflow occurred when summing `BookLevel` raw size")]
+fn test_book_get_levels_for_price_panics_on_raw_size_overflow() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L3_MBO);
+    let price = Price::from("1.001");
+    let size = Quantity::from_raw(QUANTITY_RAW_MAX, FIXED_PRECISION);
+    let ask1 = BookOrder::new(OrderSide::Sell, price, size, 1);
+    let ask2 = BookOrder::new(OrderSide::Sell, price, size, 2);
+    book.add(ask1, 0, 1, 1.into());
+    book.add(ask2, 0, 2, 2.into());
+
+    let _ = book.get_all_crossed_levels(OrderSide::Buy, price, FIXED_PRECISION);
 }
 
 #[rstest]

@@ -106,6 +106,27 @@ pub struct OKXDataClientConfig {
     pub transport_backend: TransportBackend,
 }
 
+#[cfg(feature = "python")]
+nautilus_core::impl_pyo3_config_getters!(OKXDataClientConfig {
+    instrument_types: Vec<OKXInstrumentType>,
+    environment: OKXEnvironment,
+    region: OKXRegion,
+    base_url_http: Option<String>,
+    base_url_ws_public: Option<String>,
+    base_url_ws_business: Option<String>,
+    http_timeout_secs: u64,
+    max_retries: u32,
+    retry_delay_initial_ms: u64,
+    retry_delay_max_ms: u64,
+    update_instruments_interval_mins: u64,
+    book_stale_check_interval_secs: u64,
+    book_stale_threshold_secs: u64,
+    book_snapshot_timeout_secs: u64,
+    vip_level: Option<OKXVipLevel>,
+    load_spreads: bool,
+    transport_backend: TransportBackend,
+});
+
 impl Default for OKXDataClientConfig {
     fn default() -> Self {
         Self::builder().build()
@@ -235,10 +256,33 @@ pub struct OKXExecClientConfig {
     /// Enables margin/leverage for SPOT trading when true.
     #[builder(default)]
     pub use_spot_margin: bool,
+    /// Optional WebSocket authentication timeout (seconds), defaulting to
+    /// `AUTHENTICATION_TIMEOUT_SECS` when unset.
+    pub auth_timeout_secs: Option<u64>,
     /// WebSocket transport backend (defaults to `Tungstenite`).
     #[builder(default)]
     pub transport_backend: TransportBackend,
 }
+
+#[cfg(feature = "python")]
+nautilus_core::impl_pyo3_config_getters!(OKXExecClientConfig {
+    trader_id: TraderId,
+    account_id: AccountId,
+    instrument_types: Vec<OKXInstrumentType>,
+    environment: OKXEnvironment,
+    region: OKXRegion,
+    base_url_http: Option<String>,
+    base_url_ws_private: Option<String>,
+    base_url_ws_business: Option<String>,
+    http_timeout_secs: u64,
+    max_retries: u32,
+    retry_delay_initial_ms: u64,
+    retry_delay_max_ms: u64,
+    margin_mode: Option<OKXMarginMode>,
+    load_spreads: bool,
+    auth_timeout_secs: Option<u64>,
+    transport_backend: TransportBackend,
+});
 
 impl Default for OKXExecClientConfig {
     fn default() -> Self {
@@ -436,5 +480,16 @@ region = "eea"
         .unwrap();
 
         assert_eq!(config.region, OKXRegion::Eea);
+    }
+
+    #[rstest]
+    fn test_exec_config_auth_timeout_secs() {
+        assert_eq!(OKXExecClientConfig::default().auth_timeout_secs, None);
+
+        let exec = OKXExecClientConfig::builder().auth_timeout_secs(4).build();
+        assert_eq!(exec.auth_timeout_secs, Some(4));
+
+        let exec: OKXExecClientConfig = toml::from_str("auth_timeout_secs = 8\n").unwrap();
+        assert_eq!(exec.auth_timeout_secs, Some(8));
     }
 }

@@ -89,8 +89,31 @@ impl KrakenDataClientConfig {
         }
     }
 
+    #[getter]
+    const fn has_proxy_url(&self) -> bool {
+        self.proxy_url.is_some()
+    }
+
+    /// Returns the configured public WebSocket URL override.
+    #[getter]
+    fn get_ws_public_url(&self) -> Option<String> {
+        self.ws_public_url.clone()
+    }
+
+    /// Returns the configured private WebSocket URL override.
+    #[getter]
+    fn get_ws_private_url(&self) -> Option<String> {
+        self.ws_private_url.clone()
+    }
+
+    /// Returns the configured L3 WebSocket URL override.
+    #[getter]
+    fn get_ws_l3_url(&self) -> Option<String> {
+        self.ws_l3_url.clone()
+    }
+
     fn __repr__(&self) -> String {
-        format!("{self:?}")
+        stringify!(KrakenDataClientConfig).to_string()
     }
 }
 
@@ -111,6 +134,7 @@ impl KrakenExecClientConfig {
         proxy_url = None,
         timeout_secs = None,
         heartbeat_interval_secs = None,
+        auth_timeout_secs = None,
         max_requests_per_second = None,
         spot_account_type = None,
         default_leverage = None,
@@ -134,6 +158,7 @@ impl KrakenExecClientConfig {
         proxy_url: Option<String>,
         timeout_secs: Option<u64>,
         heartbeat_interval_secs: Option<u64>,
+        auth_timeout_secs: Option<u64>,
         max_requests_per_second: Option<u32>,
         spot_account_type: Option<AccountType>,
         default_leverage: Option<u16>,
@@ -164,6 +189,7 @@ impl KrakenExecClientConfig {
             timeout_secs: timeout_secs.unwrap_or(defaults.timeout_secs),
             heartbeat_interval_secs: heartbeat_interval_secs
                 .unwrap_or(defaults.heartbeat_interval_secs),
+            auth_timeout_secs,
             max_requests_per_second,
             transport_backend: transport_backend.unwrap_or(defaults.transport_backend),
             spot_account_type,
@@ -179,7 +205,18 @@ impl KrakenExecClientConfig {
         })
     }
 
+    #[getter]
+    const fn has_proxy_url(&self) -> bool {
+        self.proxy_url.is_some()
+    }
+
+    /// Returns the configured WebSocket URL override.
+    #[getter]
+    fn get_ws_url(&self) -> Option<String> {
+        self.ws_url.clone()
+    }
+
     fn __repr__(&self) -> String {
-        format!("{self:?}")
+        stringify!(KrakenExecClientConfig).to_string()
     }
 }

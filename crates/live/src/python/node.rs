@@ -23,7 +23,10 @@ use nautilus_common::{
     enums::Environment,
     live::get_runtime,
     logging::logger::LoggerConfig,
-    python::actor::{PyDataActor, register_python_exec_algorithm_endpoint},
+    python::{
+        actor::{PyDataActor, register_python_exec_algorithm_endpoint},
+        cache::PyCache,
+    },
 };
 #[cfg(feature = "examples")]
 use nautilus_core::python::to_pytype_err;
@@ -31,10 +34,11 @@ use nautilus_core::{
     UUID4,
     python::{to_pyruntime_err, to_pyvalue_err},
 };
-use nautilus_model::identifiers::{
-    ActorId, ComponentId, ExecAlgorithmId, InstrumentId, StrategyId, TraderId,
+use nautilus_model::{
+    enums::OmsType,
+    identifiers::{ActorId, ComponentId, ExecAlgorithmId, InstrumentId, StrategyId, TraderId},
 };
-use nautilus_portfolio::config::PortfolioConfig;
+use nautilus_portfolio::{config::PortfolioConfig, python::PyPortfolio};
 use nautilus_system::get_global_pyo3_registry;
 #[cfg(feature = "examples")]
 use nautilus_testkit::{DataTester, DataTesterConfig, ExecTester, ExecTesterConfig};
@@ -66,7 +70,7 @@ use crate::{
         LiveDataEngineConfig, LiveExecEngineConfig, LiveNodeConfig, LiveRiskEngineConfig,
         PluginConfig,
     },
-    node::LiveNode,
+    node::{LiveNode, NodeState, config::RoutingConfig},
     python::config::coerce_json_config,
 };
 
@@ -143,6 +147,20 @@ impl LiveNode {
         self.is_running()
     }
 
+    /// Returns the cache shared with the kernel and registered components.
+    #[getter]
+    #[pyo3(name = "cache")]
+    fn py_cache(&self) -> PyCache {
+        PyCache::from_rc(self.kernel().cache())
+    }
+
+    /// Returns the portfolio shared with the kernel and registered components.
+    #[getter]
+    #[pyo3(name = "portfolio")]
+    fn py_portfolio(&self) -> PyPortfolio {
+        PyPortfolio::from_rc(self.kernel().portfolio.clone())
+    }
+
     /// Starts the live node without entering a select loop.
     ///
     /// Connects clients, runs reconciliation, and starts the trader, but does
@@ -160,8 +178,22 @@ impl LiveNode {
             return Err(to_pyruntime_err("LiveNode is already running"));
         }
 
-        // Non-blocking start - just start the node in the background
         get_runtime().block_on(async { self.start().await.map_err(to_pyruntime_err) })
+    }
+
+    /// Processes the live-node channel traffic queued when this method is called.
+    ///
+    /// This provides a non-blocking integration for host loops after `start`.
+    /// Events that arrive while polling remain queued for the next call.
+    /// Use `run` when the node should also own maintenance, external
+    /// ingress, signal handling, and automatic shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node is not running or its runner is unavailable.
+    #[pyo3(name = "poll")]
+    fn py_poll(&mut self) -> PyResult<usize> {
+        self.poll().map_err(to_pyruntime_err)
     }
 
     /// Run the live node with automatic shutdown handling.
@@ -408,6 +440,92 @@ impl LiveNode {
         Ok(())
     }
 
+    /// Adds a strategy to the trader.
+    ///
+    /// Strategies are registered in both the component registry (for lifecycle management)
+    /// and the actor registry (for data callbacks via msgbus).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The node is currently running.
+    /// - A strategy with the same ID is already registered.
+    #[allow(
+        unsafe_code,
+        reason = "Required for Python strategy component registration"
+    )]
+    #[pyo3(name = "add_strategy")]
+    fn py_add_strategy(&mut self, strategy: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.state() != NodeState::Idle {
+            return Err(to_pyruntime_err(
+                "Cannot add strategy while node is running, add strategies before calling start()",
+            ));
+        }
+
+        log::debug!("`add_strategy` with a constructed instance");
+
+        let strategy = strategy.clone().unbind();
+
+        let strategy_id = self
+            .kernel_mut()
+            .trader
+            .borrow_mut()
+            .prepare_python_strategy_instance(&strategy)
+            .map_err(to_pyruntime_err)?;
+
+        let (external_order_claims, oms_type) = Python::attach(
+            |py| -> anyhow::Result<(Option<Vec<InstrumentId>>, Option<OmsType>)> {
+                let bound = strategy.bind(py);
+                let config_obj = bound
+                    .getattr("config")
+                    .ok()
+                    .filter(|config| !config.is_none());
+
+                let mut py_strategy_ref = bound
+                    .extract::<PyRefMut<PyStrategy>>()
+                    .map_err(Into::<PyErr>::into)
+                    .map_err(|e| anyhow::anyhow!("Failed to extract PyStrategy: {e}"))?;
+
+                if let Some(config_obj) = config_obj.as_ref()
+                    && let Some(claims) = extract_external_order_claims_config_attr(config_obj)?
+                {
+                    py_strategy_ref.set_external_order_claims(Some(claims));
+                }
+
+                let claims = py_strategy_ref.external_order_claims();
+                let oms_type = config_obj
+                    .as_ref()
+                    .and_then(|cfg| cfg.getattr("oms_type").ok())
+                    .filter(|value| !value.is_none())
+                    .and_then(|value| value.extract::<OmsType>().ok());
+
+                Ok((claims, oms_type))
+            },
+        )
+        .map_err(to_pyruntime_err)?;
+
+        if let Some(claims) = external_order_claims.filter(|claims| !claims.is_empty()) {
+            self.register_external_order_claims(strategy_id, &claims)
+                .map_err(to_pyruntime_err)?;
+        }
+
+        self.kernel_mut()
+            .trader
+            .borrow_mut()
+            .commit_python_strategy_instance(&strategy)
+            .map_err(to_pyruntime_err)?;
+
+        if let Some(oms_type) = oms_type {
+            self.kernel()
+                .exec_engine
+                .borrow_mut()
+                .register_oms_type(strategy_id, oms_type);
+        }
+
+        log::info!("Registered Python strategy {strategy_id}");
+        Ok(())
+    }
+
     #[allow(
         unsafe_code,
         reason = "Required for Python strategy component registration"
@@ -587,6 +705,59 @@ impl LiveNode {
         Ok(())
     }
 
+    /// Adds an execution algorithm to the trader.
+    ///
+    /// Execution algorithms are registered in both the component registry (for lifecycle
+    /// management) and the actor registry (for data callbacks via msgbus).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The node is currently running.
+    /// - An execution algorithm with the same ID is already registered.
+    #[pyo3(name = "add_exec_algorithm")]
+    fn py_add_exec_algorithm(&mut self, exec_algorithm: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.state() != NodeState::Idle {
+            return Err(to_pyruntime_err(
+                "Cannot add exec algorithm while node is running, add exec algorithms before calling start()",
+            ));
+        }
+
+        log::debug!("`add_exec_algorithm` with a constructed instance");
+
+        let exec_algorithm = exec_algorithm.clone().unbind();
+        let py_exec_algorithm = Python::attach(|py| -> anyhow::Result<PyExecutionAlgorithm> {
+            let bound = exec_algorithm.bind(py);
+            let config = bound
+                .getattr("config")
+                .ok()
+                .filter(|config| !config.is_none());
+            let mut py_exec_algorithm_ref = bound
+                .extract::<PyRefMut<PyExecutionAlgorithm>>()
+                .map_err(Into::<PyErr>::into)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "LiveNode.add_exec_algorithm requires a Python v2 ExecutionAlgorithm instance; use add_exec_algorithm_from_config for DataActor-based algorithms: {e}"
+                    )
+                })?;
+
+            if let Some(config) = config.as_ref() {
+                py_exec_algorithm_ref.configure_from_py_config(config)?;
+            }
+
+            py_exec_algorithm_ref.set_python_instance(exec_algorithm.clone_ref(py));
+            Ok(py_exec_algorithm_ref.clone())
+        })
+        .map_err(to_pyruntime_err)?;
+
+        let exec_algorithm_id = py_exec_algorithm.exec_algorithm_id();
+        self.add_exec_algorithm(py_exec_algorithm)
+            .map_err(to_pyruntime_err)?;
+
+        log::info!("Registered Python exec algorithm {exec_algorithm_id}");
+        Ok(())
+    }
+
     #[allow(
         unsafe_code,
         reason = "Required for Python exec algorithm component registration"
@@ -641,7 +812,7 @@ impl LiveNode {
                     python_exec_algorithm.extract::<PyRefMut<PyExecutionAlgorithm>>()
                 {
                     if let Some(config_obj) = config_instance.as_ref() {
-                        configure_py_execution_algorithm(&mut py_exec_algorithm_ref, config_obj)?;
+                        py_exec_algorithm_ref.configure_from_py_config(config_obj)?;
                     }
 
                     py_exec_algorithm_ref
@@ -780,11 +951,11 @@ impl LiveNode {
         Ok(())
     }
 
-    /// Rejects plug-in registration when host support is not linked.
+    /// Loads and registers one plug-in instance.
     ///
     /// # Errors
     ///
-    /// Always returns an error explaining that host-side support is required.
+    /// Returns an error because dynamic plug-in hosting lives in the host-side integration.
     #[pyo3(name = "add_plugin", signature = (path, type_name, config=None, sha256=None))]
     fn py_add_plugin(
         &mut self,
@@ -1217,13 +1388,14 @@ impl LiveNodeBuilderPy {
         }
     }
 
-    #[pyo3(name = "add_data_client")]
+    #[pyo3(name = "add_data_client", signature = (name, factory, config, routing=None))]
     #[expect(clippy::needless_pass_by_value)]
     fn py_add_data_client(
         &self,
         name: Option<String>,
         factory: Py<PyAny>,
         config: Py<PyAny>,
+        routing: Option<RoutingConfig>,
     ) -> PyResult<Self> {
         let mut inner_ref = self.inner.borrow_mut();
         if let Some(builder) = inner_ref.take() {
@@ -1242,7 +1414,17 @@ impl LiveNodeBuilderPy {
                 let client_name = name.unwrap_or(factory_name);
 
                 // Add the data client to the builder using boxed trait objects
-                match builder.add_data_client(Some(client_name), boxed_factory, boxed_config) {
+                let result = match routing {
+                    Some(routing) => builder.add_data_client_with_routing(
+                        Some(client_name),
+                        boxed_factory,
+                        boxed_config,
+                        routing,
+                    ),
+                    None => builder.add_data_client(Some(client_name), boxed_factory, boxed_config),
+                };
+
+                match result {
                     Ok(updated_builder) => {
                         *inner_ref = Some(updated_builder);
                         Ok(Self {
@@ -1257,13 +1439,14 @@ impl LiveNodeBuilderPy {
         }
     }
 
-    #[pyo3(name = "add_exec_client")]
+    #[pyo3(name = "add_exec_client", signature = (name, factory, config, routing=None))]
     #[expect(clippy::needless_pass_by_value)]
     fn py_add_exec_client(
         &self,
         name: Option<String>,
         factory: Py<PyAny>,
         config: Py<PyAny>,
+        routing: Option<RoutingConfig>,
     ) -> PyResult<Self> {
         let mut inner_ref = self.inner.borrow_mut();
         if let Some(builder) = inner_ref.take() {
@@ -1279,7 +1462,17 @@ impl LiveNodeBuilderPy {
                     .extract::<String>(py)?;
                 let client_name = name.unwrap_or(factory_name);
 
-                match builder.add_exec_client(Some(client_name), boxed_factory, boxed_config) {
+                let result = match routing {
+                    Some(routing) => builder.add_exec_client_with_routing(
+                        Some(client_name),
+                        boxed_factory,
+                        boxed_config,
+                        routing,
+                    ),
+                    None => builder.add_exec_client(Some(client_name), boxed_factory, boxed_config),
+                };
+
+                match result {
                     Ok(updated_builder) => {
                         *inner_ref = Some(updated_builder);
                         Ok(Self {
@@ -1474,40 +1667,6 @@ fn extract_bool_config_attr(config_obj: &Bound<'_, PyAny>, attr: &str) -> Option
         .and_then(|val| val.extract::<bool>().ok())
 }
 
-fn configure_py_execution_algorithm(
-    py_exec_algorithm_ref: &mut PyRefMut<'_, PyExecutionAlgorithm>,
-    config_obj: &Bound<'_, PyAny>,
-) -> anyhow::Result<()> {
-    let id_attr = config_obj
-        .getattr("exec_algorithm_id")
-        .ok()
-        .filter(|v| !v.is_none())
-        .or_else(|| config_obj.getattr("actor_id").ok().filter(|v| !v.is_none()));
-
-    if let Some(id_value) = id_attr {
-        let exec_algorithm_id = if let Ok(eaid) = id_value.extract::<ExecAlgorithmId>() {
-            eaid
-        } else if let Ok(aid) = id_value.extract::<ActorId>() {
-            ExecAlgorithmId::new_checked(aid.inner().as_str())?
-        } else if let Ok(id_str) = id_value.extract::<String>() {
-            ExecAlgorithmId::new_checked(&id_str)?
-        } else {
-            anyhow::bail!("Invalid `exec_algorithm_id`/`actor_id` type");
-        };
-        py_exec_algorithm_ref.set_exec_algorithm_id(exec_algorithm_id);
-    }
-
-    if let Some(val) = extract_bool_config_attr(config_obj, "log_events") {
-        py_exec_algorithm_ref.set_log_events(val);
-    }
-
-    if let Some(val) = extract_bool_config_attr(config_obj, "log_commands") {
-        py_exec_algorithm_ref.set_log_commands(val);
-    }
-
-    Ok(())
-}
-
 fn extract_external_order_claims_config_attr(
     config_obj: &Bound<'_, PyAny>,
 ) -> anyhow::Result<Option<Vec<InstrumentId>>> {
@@ -1568,16 +1727,19 @@ mod tests {
         messages::{
             DataEvent, DataResponse,
             data::{BarsResponse, RequestBars},
-            execution::{CancelAllOrders, TradingCommand},
+            execution::{CancelAllOrders, SubmitOrder, TradingCommand},
         },
         msgbus::get_message_bus,
         runner::get_trading_cmd_sender,
     };
     use nautilus_core::{UUID4, UnixNanos};
+    use nautilus_execution::engine::stubs::StubExecutionClient;
     use nautilus_model::{
         data::{Bar, BarType},
-        enums::OrderSide,
-        identifiers::{ClientId, InstrumentId, StrategyId, TraderId, Venue},
+        enums::{OmsType, OrderSide, OrderStatus, OrderType},
+        identifiers::{AccountId, ClientId, InstrumentId, PositionId, StrategyId, TraderId, Venue},
+        instruments::{Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt},
+        orders::{Order, OrderTestBuilder},
         types::{Price, Quantity},
     };
     use nautilus_trading::{
@@ -1586,12 +1748,13 @@ mod tests {
         strategy::{StrategyConfig, StrategyCore},
     };
     use pyo3::{
-        Python,
+        PyRef, Python,
         types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods},
     };
     use rstest::rstest;
 
     use super::LiveNode;
+    use crate::node::config::RoutingConfig;
 
     #[derive(Clone, Copy, Debug)]
     enum ShutdownRunPath {
@@ -1637,7 +1800,6 @@ mod tests {
             Ok(())
         }
     }
-
     #[derive(Debug, Default)]
     struct TestDataClientConfig;
 
@@ -1795,6 +1957,82 @@ mod tests {
         async fn disconnect(&mut self) -> anyhow::Result<()> {
             self.connected.store(false, Ordering::Relaxed);
             anyhow::bail!("test disconnect failed")
+        }
+    }
+
+    struct VenueLessDataClient {
+        client_id: ClientId,
+    }
+
+    impl VenueLessDataClient {
+        fn new(client_id: ClientId) -> Self {
+            Self { client_id }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl DataClient for VenueLessDataClient {
+        fn client_id(&self) -> ClientId {
+            self.client_id
+        }
+
+        fn venue(&self) -> Option<Venue> {
+            None
+        }
+
+        fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn dispose(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn is_disconnected(&self) -> bool {
+            false
+        }
+
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct VenueLessDataClientFactory;
+
+    impl DataClientFactory for VenueLessDataClientFactory {
+        fn create(
+            &self,
+            name: &str,
+            _config: &dyn ClientConfig,
+            _cache: CacheView,
+            _clock: Rc<RefCell<dyn Clock>>,
+        ) -> anyhow::Result<Box<dyn DataClient>> {
+            Ok(Box::new(VenueLessDataClient::new(ClientId::from(name))))
+        }
+
+        fn name(&self) -> &'static str {
+            "VENUE_LESS"
+        }
+
+        fn config_type(&self) -> &'static str {
+            "TestDataClientConfig"
         }
     }
 
@@ -2075,9 +2313,17 @@ class LiveTimerStrategy(Strategy):
         let code = CString::new(
             "
 class ClaimsConfig:
-    def __init__(self, strategy_id=None, external_order_claims=None):
+    def __init__(
+        self,
+        strategy_id=None,
+        order_id_tag=None,
+        external_order_claims=None,
+        oms_type=None,
+    ):
         self.strategy_id = strategy_id
+        self.order_id_tag = order_id_tag
         self.external_order_claims = external_order_claims
+        self.oms_type = oms_type
 
 class ClaimsStrategy(Strategy):
     def __init__(self, config):
@@ -2183,6 +2429,24 @@ class ClaimsStrategy(Strategy):
     fn test_builtin_register_rejects_unknown_names() {
         assert!(super::builtin_strategy_register("UnknownStrategy").is_none());
         assert!(super::builtin_actor_register("UnknownActor").is_none());
+    }
+
+    #[rstest]
+    fn test_inspection_wrappers_share_kernel_state() {
+        let node = LiveNode::builder(TraderId::from("TESTER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .build()
+            .unwrap();
+
+        let cache = node.py_cache();
+        let portfolio = node.py_portfolio();
+
+        assert!(Rc::ptr_eq(&cache.cache_rc(), &node.kernel().cache));
+        assert!(Rc::ptr_eq(
+            &portfolio.portfolio_rc(),
+            &node.kernel().portfolio
+        ));
     }
 
     #[cfg(feature = "examples")]
@@ -2314,6 +2578,53 @@ class ClaimsStrategy(Strategy):
             acquired_before_stop.load(Ordering::SeqCst),
             "worker thread should acquire the GIL while LiveNode::run is blocked"
         );
+    }
+
+    #[rstest]
+    fn test_build_routes_venue_less_data_client_with_venue_routing() {
+        Python::initialize();
+
+        let routing = RoutingConfig::builder()
+            .venues(vec!["IBIS".to_string()])
+            .build();
+        let node = LiveNode::builder(TraderId::from("TEST-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_timeout_connection(1)
+            .add_data_client_with_routing(
+                Some("IB".to_string()),
+                Box::new(VenueLessDataClientFactory),
+                Box::new(TestDataClientConfig),
+                routing,
+            )
+            .unwrap()
+            .build();
+
+        assert!(node.is_ok(), "build should succeed: {:?}", node.err());
+    }
+
+    #[rstest]
+    fn test_build_routes_venue_less_data_client_with_default_and_venues() {
+        Python::initialize();
+
+        let routing = RoutingConfig::builder()
+            .default(true)
+            .venues(vec!["IBIS".to_string()])
+            .build();
+        let node = LiveNode::builder(TraderId::from("TEST-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_timeout_connection(1)
+            .add_data_client_with_routing(
+                Some("IB".to_string()),
+                Box::new(VenueLessDataClientFactory),
+                Box::new(TestDataClientConfig),
+                routing,
+            )
+            .unwrap()
+            .build();
+
+        assert!(node.is_ok(), "build should succeed: {:?}", node.err());
     }
 
     #[rstest]
@@ -2537,6 +2848,315 @@ class ClaimsStrategy(Strategy):
                 .to_string()
                 .contains("already exists for CLAIMS-001")
         );
+    }
+
+    #[rstest]
+    fn test_add_strategy_registers_constructed_python_instance() {
+        Python::initialize();
+
+        let module_name = "test_live_node_add_strategy_instance";
+        Python::attach(|py| install_claim_strategy_module(py, module_name));
+
+        let mut node = LiveNode::builder(TraderId::from("TESTER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_delay_post_stop_secs(0)
+            .with_timeout_connection(1)
+            .build()
+            .unwrap();
+
+        let instrument_id = InstrumentId::from("AUDUSD.SIM");
+        let strategy_id = StrategyId::from("CLAIMS-002");
+
+        Python::attach(|py| {
+            let module = py.import(module_name).expect("test module should import");
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("strategy_id", strategy_id.to_string())
+                .unwrap();
+            kwargs
+                .set_item("external_order_claims", vec![instrument_id.to_string()])
+                .unwrap();
+            let config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
+            let strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((config,))
+                .unwrap();
+
+            node.py_add_strategy(&strategy)
+                .expect("strategy should register");
+        });
+
+        {
+            let exec_engine = node.kernel().exec_engine.borrow();
+            assert_eq!(
+                exec_engine.get_external_order_claim(&instrument_id),
+                Some(strategy_id)
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_add_strategy_constructed_python_instance_registers_oms_type() {
+        Python::initialize();
+
+        let module_name = "test_live_node_add_strategy_instance_oms_type";
+        Python::attach(|py| install_claim_strategy_module(py, module_name));
+
+        let mut node = LiveNode::builder(TraderId::from("TESTER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_delay_post_stop_secs(0)
+            .with_timeout_connection(1)
+            .build()
+            .unwrap();
+        let strategy_id = StrategyId::from("FUNDING_ARBITRAGE-003");
+
+        Python::attach(|py| {
+            let module = py.import(module_name).expect("test module should import");
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("strategy_id", strategy_id.to_string())
+                .unwrap();
+            kwargs.set_item("oms_type", OmsType::Hedging).unwrap();
+            let config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
+            let strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((config,))
+                .unwrap();
+
+            node.py_add_strategy(&strategy)
+                .expect("strategy should register");
+        });
+
+        let instrument = crypto_perpetual_ethusdt();
+        let instrument_id = instrument.id();
+        let client_id = ClientId::from("STUB");
+
+        node.kernel()
+            .cache
+            .borrow_mut()
+            .add_instrument(InstrumentAny::CryptoPerpetual(instrument))
+            .unwrap();
+        node.kernel()
+            .exec_engine
+            .borrow_mut()
+            .register_client(Box::new(StubExecutionClient::new(
+                client_id,
+                AccountId::from("TEST-ACCOUNT"),
+                instrument_id.venue,
+                OmsType::Netting,
+                None,
+            )))
+            .unwrap();
+
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .trader_id(node.trader_id())
+            .strategy_id(strategy_id)
+            .instrument_id(instrument_id)
+            .quantity(Quantity::from("1.000"))
+            .build();
+        let position_id = PositionId::new("CUSTOM-POSITION-003");
+
+        node.kernel()
+            .cache
+            .borrow_mut()
+            .add_order(order.clone(), Some(position_id), Some(client_id), true)
+            .unwrap();
+
+        let submit_order = SubmitOrder::new(
+            order.trader_id(),
+            Some(client_id),
+            strategy_id,
+            instrument_id,
+            order.client_order_id(),
+            order.init_event().clone(),
+            order.exec_algorithm_id(),
+            Some(position_id),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        );
+
+        node.kernel()
+            .exec_engine
+            .borrow()
+            .execute(TradingCommand::SubmitOrder(submit_order));
+
+        let exec_engine = node.kernel().exec_engine.borrow();
+        let cache = exec_engine.cache().borrow();
+        let cached_order = cache
+            .order(&order.client_order_id())
+            .expect("Order should be cached");
+
+        assert_eq!(cached_order.status(), OrderStatus::Initialized);
+    }
+
+    #[rstest]
+    fn test_add_strategy_constructed_python_instance_claim_conflict_does_not_register() {
+        Python::initialize();
+
+        let module_name = "test_live_node_add_strategy_instance_claim_conflict";
+        Python::attach(|py| install_claim_strategy_module(py, module_name));
+
+        let mut node = LiveNode::builder(TraderId::from("TESTER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_delay_post_stop_secs(0)
+            .with_timeout_connection(1)
+            .build()
+            .unwrap();
+        let instrument_id = InstrumentId::from("AUDUSD.SIM");
+        let first_strategy_id = StrategyId::from("CLAIMS-PRIMARY-001");
+        let conflicting_strategy_id = StrategyId::from("CLAIMS-CONFLICT-002");
+
+        let (error, conflicting_strategy_registered) = Python::attach(|py| {
+            let module = py.import(module_name).expect("test module should import");
+            let first_kwargs = PyDict::new(py);
+            first_kwargs
+                .set_item("strategy_id", first_strategy_id.to_string())
+                .unwrap();
+            first_kwargs
+                .set_item("external_order_claims", vec![instrument_id.to_string()])
+                .unwrap();
+            let first_config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&first_kwargs))
+                .unwrap();
+            let first_strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((first_config,))
+                .unwrap();
+            node.py_add_strategy(&first_strategy)
+                .expect("first strategy should register");
+
+            let conflicting_kwargs = PyDict::new(py);
+            conflicting_kwargs
+                .set_item("strategy_id", conflicting_strategy_id.to_string())
+                .unwrap();
+            conflicting_kwargs
+                .set_item("external_order_claims", vec![instrument_id.to_string()])
+                .unwrap();
+            let conflicting_config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&conflicting_kwargs))
+                .unwrap();
+            let conflicting_strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((conflicting_config,))
+                .unwrap();
+            let error = node
+                .py_add_strategy(&conflicting_strategy)
+                .expect_err("conflicting claim should fail");
+            let is_registered = conflicting_strategy
+                .extract::<PyRef<PyStrategy>>()
+                .unwrap()
+                .is_registered();
+
+            (error, is_registered)
+        });
+
+        let strategy_ids = node.kernel().trader.borrow().strategy_ids();
+        let manager_claim = node.exec_manager().get_external_order_claim(&instrument_id);
+        let engine_claim = node
+            .kernel()
+            .exec_engine
+            .borrow()
+            .get_external_order_claim(&instrument_id);
+
+        assert!(
+            error
+                .to_string()
+                .contains("already exists for CLAIMS-PRIMARY-001")
+        );
+        assert!(!conflicting_strategy_registered);
+        assert_eq!(strategy_ids, vec![first_strategy_id]);
+        assert_eq!(manager_claim, Some(first_strategy_id));
+        assert_eq!(engine_claim, Some(first_strategy_id));
+    }
+
+    #[rstest]
+    fn test_add_strategy_constructed_python_instance_duplicate_tag_does_not_register() {
+        Python::initialize();
+
+        let module_name = "test_live_node_add_strategy_instance_duplicate_tag";
+        Python::attach(|py| install_claim_strategy_module(py, module_name));
+
+        let mut node = LiveNode::builder(TraderId::from("TESTER-001"), Environment::Sandbox)
+            .unwrap()
+            .with_reconciliation(false)
+            .with_delay_post_stop_secs(0)
+            .with_timeout_connection(1)
+            .build()
+            .unwrap();
+        let first_strategy_id = StrategyId::from("TAGGED-FIRST-777");
+
+        let (error, duplicate_strategy_registered) = Python::attach(|py| {
+            let module = py.import(module_name).expect("test module should import");
+            let first_kwargs = PyDict::new(py);
+            first_kwargs
+                .set_item("strategy_id", "TAGGED-FIRST")
+                .unwrap();
+            first_kwargs.set_item("order_id_tag", "777").unwrap();
+            let first_config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&first_kwargs))
+                .unwrap();
+            let first_strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((first_config,))
+                .unwrap();
+            node.py_add_strategy(&first_strategy)
+                .expect("first strategy should register");
+
+            let duplicate_kwargs = PyDict::new(py);
+            duplicate_kwargs
+                .set_item("strategy_id", "TAGGED-SECOND")
+                .unwrap();
+            duplicate_kwargs.set_item("order_id_tag", "777").unwrap();
+            let duplicate_config = module
+                .getattr("ClaimsConfig")
+                .unwrap()
+                .call((), Some(&duplicate_kwargs))
+                .unwrap();
+            let duplicate_strategy = module
+                .getattr("ClaimsStrategy")
+                .unwrap()
+                .call1((duplicate_config,))
+                .unwrap();
+            let error = node
+                .py_add_strategy(&duplicate_strategy)
+                .expect_err("duplicate order ID tag should fail");
+            let is_registered = duplicate_strategy
+                .extract::<PyRef<PyStrategy>>()
+                .unwrap()
+                .is_registered();
+
+            (error, is_registered)
+        });
+
+        let strategy_ids = node.kernel().trader.borrow().strategy_ids();
+
+        assert!(error.to_string().contains("order_id_tag conflict"));
+        assert!(!duplicate_strategy_registered);
+        assert_eq!(strategy_ids, vec![first_strategy_id]);
     }
 
     #[tokio::test(flavor = "current_thread")]

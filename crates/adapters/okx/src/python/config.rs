@@ -109,8 +109,13 @@ impl OKXDataClientConfig {
         }
     }
 
+    #[getter]
+    const fn has_proxy_url(&self) -> bool {
+        self.proxy_url.is_some()
+    }
+
     fn __repr__(&self) -> String {
-        format!("{self:?}")
+        stringify!(OKXDataClientConfig).to_string()
     }
 }
 
@@ -138,6 +143,7 @@ impl OKXExecClientConfig {
         retry_delay_max_ms = None,
         margin_mode = None,
         load_spreads = false,
+        auth_timeout_secs = None,
         transport_backend = None,
     ))]
     #[expect(clippy::too_many_arguments)]
@@ -160,6 +166,7 @@ impl OKXExecClientConfig {
         retry_delay_max_ms: Option<u64>,
         margin_mode: Option<OKXMarginMode>,
         load_spreads: bool,
+        auth_timeout_secs: Option<u64>,
         transport_backend: Option<TransportBackend>,
     ) -> Self {
         let defaults = Self::default();
@@ -188,12 +195,18 @@ impl OKXExecClientConfig {
             margin_mode,
             load_spreads,
             use_spot_margin: defaults.use_spot_margin,
+            auth_timeout_secs,
             transport_backend: transport_backend.unwrap_or(defaults.transport_backend),
         }
     }
 
+    #[getter]
+    const fn has_proxy_url(&self) -> bool {
+        self.proxy_url.is_some()
+    }
+
     fn __repr__(&self) -> String {
-        format!("{self:?}")
+        stringify!(OKXExecClientConfig).to_string()
     }
 }
 
@@ -238,8 +251,10 @@ mod tests {
             None,
             true,
             None,
+            None,
         );
 
         assert!(config.load_spreads);
+        assert_eq!(config.auth_timeout_secs, None);
     }
 }

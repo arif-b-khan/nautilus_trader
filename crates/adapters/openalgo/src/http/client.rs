@@ -20,7 +20,10 @@ use std::{fmt, sync::Arc};
 
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader._libnautilus.openalgo")
+    pyo3::pyclass(
+        module = "nautilus_trader._libnautilus.openalgo",
+        from_py_object
+    )
 )]
 #[derive(Clone)]
 pub struct OpenAlgoHttpClient {

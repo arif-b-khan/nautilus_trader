@@ -15,6 +15,7 @@
 
 //! Python bindings for the Ax HTTP client.
 
+use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 use nautilus_core::{datetime::datetime_to_unix_nanos, python::to_pyvalue_err};
 use nautilus_model::{
@@ -30,7 +31,7 @@ use rust_decimal::Decimal;
 use crate::{
     common::{
         enums::{AxCandleWidth, AxOrderSide},
-        parse::quantity_to_contracts,
+        parse::{client_order_id_to_cid, quantity_to_contracts},
     },
     http::{client::AxHttpClient, error::AxHttpError, models::PreviewAggressiveLimitOrderRequest},
 };
@@ -229,6 +230,9 @@ impl AxHttpClient {
 
     /// Requests all instruments from Ax.
     ///
+    /// Fee rates fall back to the rates last resolved from `GET /whoami`, and to zero when no
+    /// rates have been resolved.
+    ///
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or instrument parsing fails.
@@ -342,7 +346,40 @@ impl AxHttpClient {
         })
     }
 
+    /// Requests an order book snapshot from Ax and builds a Nautilus `OrderBook`.
+    ///
+    /// Requires the instrument to be cached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The instrument is not found in the cache.
+    /// - The HTTP request fails.
+    #[pyo3(name = "request_book_snapshot")]
+    #[pyo3(signature = (instrument_id, depth=None))]
+    fn py_request_book_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        instrument_id: InstrumentId,
+        depth: Option<u32>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let symbol = instrument_id.symbol.inner();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let book = client
+                .request_book_snapshot(symbol, depth.map(|value| value as usize))
+                .await
+                .map_err(to_pyvalue_err)?;
+
+            Python::attach(|py| book.into_py_any(py))
+        })
+    }
+
     /// Requests funding rates from Ax and parses them to Nautilus types.
+    ///
+    /// Traverses the provider's cursor chain. This is a best-effort historical
+    /// read, not an atomic snapshot if AX corrects rows during the traversal.
     ///
     /// # Errors
     ///
@@ -453,7 +490,7 @@ impl AxHttpClient {
 
     /// Requests open orders from Ax and parses them to Nautilus `OrderStatusReport`.
     ///
-    /// Requires instruments to be cached for parsing order details.
+    /// Missing instruments are requested from Ax and cached before parsing order details.
     ///
     /// The `cid_resolver` parameter is an optional function that resolves a `cid` (u64)
     /// to a `ClientOrderId`. This is needed for correlating orders submitted via WebSocket.
@@ -462,19 +499,29 @@ impl AxHttpClient {
     ///
     /// Returns an error if:
     /// - The HTTP request fails.
-    /// - An order's instrument is not found in the cache.
-    /// - Order parsing fails.
-    #[pyo3(name = "request_order_status_reports")]
+    /// - An order's instrument cannot be fetched or parsed.
+    ///
+    /// # Notes
+    ///
+    /// Order parsing failures are skipped with a warning.
+    #[pyo3(name = "request_order_status_reports", signature = (account_id, client_order_ids=None))]
     fn py_request_order_status_reports<'py>(
         &self,
         py: Python<'py>,
         account_id: AccountId,
+        client_order_ids: Option<Vec<ClientOrderId>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
+        let cid_map = client_order_ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|client_order_id| (client_order_id_to_cid(&client_order_id), client_order_id))
+            .collect::<AHashMap<_, _>>();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let cid_resolver = move |cid: u64| cid_map.get(&cid).copied();
             let reports = client
-                .request_order_status_reports(account_id, None::<fn(u64) -> Option<ClientOrderId>>)
+                .request_order_status_reports(account_id, Some(cid_resolver))
                 .await
                 .map_err(to_pyvalue_err)?;
 
@@ -491,13 +538,15 @@ impl AxHttpClient {
 
     /// Requests fills from Ax and parses them to Nautilus `FillReport`.
     ///
-    /// Requires instruments to be cached for parsing fill details.
+    /// Missing instruments are requested from Ax and cached before parsing fill details.
+    /// Traverses the provider's cursor chain. This is a best-effort historical
+    /// read, not an atomic snapshot if AX corrects rows during the traversal.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The HTTP request fails.
-    /// - A fill's instrument is not found in the cache.
+    /// - A fill's instrument cannot be fetched or parsed.
     /// - Fill parsing fails.
     #[pyo3(name = "request_fill_reports")]
     fn py_request_fill_reports<'py>(
@@ -526,14 +575,17 @@ impl AxHttpClient {
 
     /// Requests positions from Ax and parses them to Nautilus `PositionStatusReport`.
     ///
-    /// Requires instruments to be cached for parsing position details.
+    /// Missing instruments are requested from Ax and cached before parsing position details.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The HTTP request fails.
-    /// - A position's instrument is not found in the cache.
-    /// - Position parsing fails.
+    /// - A position's instrument cannot be fetched or parsed.
+    ///
+    /// # Notes
+    ///
+    /// Position parsing failures are skipped with a warning.
     #[pyo3(name = "request_position_reports")]
     fn py_request_position_reports<'py>(
         &self,

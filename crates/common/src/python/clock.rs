@@ -18,7 +18,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use chrono::{DateTime, Duration, Utc};
-use nautilus_core::{UnixNanos, python::to_pyvalue_err};
+use nautilus_core::{UnixNanos, datetime::try_datetime_to_unix_nanos, python::to_pyvalue_err};
 use pyo3::prelude::*;
 
 use crate::{
@@ -34,7 +34,7 @@ use crate::{
 /// to transparently wrap either implementation and eliminating the large
 /// amount of duplicated glue code previously required.
 ///
-/// It intentionally does **not** expose a `__new__` constructor to Python –
+/// It intentionally does **not** expose a `__new__` constructor to Python -
 /// clocks should be created from Rust and handed over to Python as needed.
 #[allow(non_camel_case_types)]
 #[pyo3::pyclass(
@@ -199,13 +199,22 @@ impl PyClock {
         }
         let interval_ns = interval_ns_i64 as u64;
 
+        let start_time_ns = start_time
+            .map(try_datetime_to_unix_nanos)
+            .transpose()
+            .map_err(to_pyvalue_err)?;
+        let stop_time_ns = stop_time
+            .map(try_datetime_to_unix_nanos)
+            .transpose()
+            .map_err(to_pyvalue_err)?;
+
         self.0
             .borrow_mut()
             .set_timer_ns(
                 name,
                 interval_ns,
-                start_time.map(UnixNanos::from),
-                stop_time.map(UnixNanos::from),
+                start_time_ns,
+                stop_time_ns,
                 callback.map(TimeEventCallback::from),
                 allow_past,
                 fire_immediately,
@@ -300,7 +309,7 @@ impl PyClock {
 mod tests {
     use std::sync::Arc;
 
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use nautilus_core::{UnixNanos, python::IntoPyObjectNautilusExt};
     use pyo3::{prelude::*, types::PyList};
     use rstest::*;
@@ -308,8 +317,8 @@ mod tests {
     use crate::{
         clock::{Clock, TestClock},
         python::clock::PyClock,
-        runner::{TimeEventSender, set_time_event_sender},
-        timer::{TimeEventCallback, TimeEventHandler},
+        runner::{TimeEventMessage, TimeEventSender, set_time_event_sender},
+        timer::TimeEventCallback,
     };
 
     fn ensure_sender() {
@@ -323,7 +332,7 @@ mod tests {
     struct DummySender;
 
     impl TimeEventSender for DummySender {
-        fn send(&self, _handler: TimeEventHandler) {}
+        fn send(&self, _message: TimeEventMessage) {}
     }
 
     #[fixture]
@@ -391,6 +400,52 @@ mod tests {
             py_clock
                 .py_set_timer("TIMER1", interval, None, None, None, None, None)
                 .expect("set_timer failed");
+        });
+    }
+
+    #[rstest]
+    fn test_test_clock_py_set_timer_rejects_unconvertible_datetime() {
+        Python::initialize();
+        Python::attach(|_py| {
+            let mut py_clock = PyClock::new_test();
+            let callback = test_py_callback();
+            py_clock.py_register_default_handler(callback);
+            let interval = Duration::seconds(2);
+            let pre_epoch = DateTime::from_timestamp_nanos(-1);
+
+            let err = py_clock
+                .py_set_timer(
+                    "PRE_EPOCH_START",
+                    interval,
+                    Some(pre_epoch),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect_err("set_timer should reject a pre-epoch start time");
+            assert!(
+                err.to_string().contains("cannot be negative"),
+                "unexpected error: {err}"
+            );
+
+            let err = py_clock
+                .py_set_timer(
+                    "PRE_EPOCH_STOP",
+                    interval,
+                    None,
+                    Some(pre_epoch),
+                    None,
+                    None,
+                    None,
+                )
+                .expect_err("set_timer should reject a pre-epoch stop time");
+            assert!(
+                err.to_string().contains("cannot be negative"),
+                "unexpected error: {err}"
+            );
+
+            assert_eq!(py_clock.py_timer_count(), 0);
         });
     }
 
