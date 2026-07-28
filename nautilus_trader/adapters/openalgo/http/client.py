@@ -41,13 +41,18 @@ class OpenAlgoHttpClient:
         timeout_secs: int = 10,
         proxy_url: str | None = None,
     ) -> None:
+        if timeout_secs != 10 or proxy_url is not None:
+            raise ValueError(
+                "timeout_secs/proxy_url are not supported by the OpenAlgo Rust SDK client yet",
+            )
+
         self._client = RustOpenAlgoHttpClient(
             api_key,
             base_url,
             api_version,
             ws_url,
-            timeout_secs,
-            proxy_url,
+            None,
+            None,
         )
 
     async def connect(self) -> None:
