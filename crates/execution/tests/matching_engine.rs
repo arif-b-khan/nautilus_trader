@@ -1866,6 +1866,158 @@ fn test_process_stop_market_order_valid_not_triggered_accepted(
 }
 
 #[rstest]
+#[case::stop_market(OrderType::StopMarket, Some(Price::from("1500.00")))]
+#[case::market_if_touched(OrderType::MarketIfTouched, Some(Price::from("1500.00")))]
+#[case::stop_market_without_last(OrderType::StopMarket, None)]
+fn test_last_price_stop_style_order_waits_for_trade(
+    #[case] order_type: OrderType,
+    #[case] initial_last: Option<Price>,
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: TypedIntoMessageSavingHandler<OrderEventAny>,
+    account_id: AccountId,
+) {
+    let (trigger_price, crossed_bid, crossed_ask, aggressor_side) = match order_type {
+        OrderType::StopMarket => (
+            Price::from("1505.00"),
+            Price::from("1504.00"),
+            Price::from("1506.00"),
+            AggressorSide::Buyer,
+        ),
+        OrderType::MarketIfTouched => (
+            Price::from("1495.00"),
+            Price::from("1494.00"),
+            Price::from("1495.00"),
+            AggressorSide::Seller,
+        ),
+        _ => unreachable!("unsupported stop-style order type: {order_type}"),
+    };
+
+    let mut engine = get_order_matching_engine(instrument_eth_usdt.clone(), None, None, None, None);
+
+    if let Some(initial_last) = initial_last {
+        let initial_trade = TradeTick::new(
+            instrument_eth_usdt.id(),
+            initial_last,
+            Quantity::from("1.000"),
+            AggressorSide::NoAggressor,
+            TradeId::new("initial"),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+        );
+        engine.process_trade_tick(&initial_trade);
+    }
+    let crossed_quote_at_submit = QuoteTick::new(
+        instrument_eth_usdt.id(),
+        crossed_bid,
+        crossed_ask,
+        Quantity::from("1.000"),
+        Quantity::from("1.000"),
+        UnixNanos::from(2),
+        UnixNanos::from(2),
+    );
+    engine.process_quote_tick(&crossed_quote_at_submit);
+
+    let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+    let mut order = OrderTestBuilder::new(order_type)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .trigger_price(trigger_price)
+        .trigger_type(TriggerType::LastPrice)
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(client_order_id)
+        .submit(true)
+        .build();
+    engine.process_order(&mut order, account_id);
+
+    let submission_events = get_order_event_handler_messages(&order_event_handler);
+
+    assert_eq!(submission_events.len(), 1);
+    assert!(matches!(
+        submission_events.first(),
+        Some(OrderEventAny::Accepted(accepted)) if accepted.client_order_id == client_order_id
+    ));
+    assert!(engine.order_exists(client_order_id));
+
+    clear_order_event_handler_messages(&order_event_handler);
+    let initial_quote = QuoteTick::new(
+        instrument_eth_usdt.id(),
+        Price::from("1499.00"),
+        Price::from("1501.00"),
+        Quantity::from("1.000"),
+        Quantity::from("1.000"),
+        UnixNanos::from(3),
+        UnixNanos::from(3),
+    );
+    engine.process_quote_tick(&initial_quote);
+
+    let crossed_quote = QuoteTick::new(
+        instrument_eth_usdt.id(),
+        crossed_bid,
+        crossed_ask,
+        Quantity::from("1.000"),
+        Quantity::from("1.000"),
+        UnixNanos::from(4),
+        UnixNanos::from(4),
+    );
+    engine.process_quote_tick(&crossed_quote);
+
+    assert!(get_order_event_handler_messages(&order_event_handler).is_empty());
+    assert!(engine.order_exists(client_order_id));
+
+    let modify = ModifyOrder::new(
+        order.trader_id(),
+        Some(ClientId::from("CLIENT-001")),
+        order.strategy_id(),
+        instrument_eth_usdt.id(),
+        client_order_id,
+        order.venue_order_id(),
+        None,
+        None,
+        Some(trigger_price),
+        UUID4::new(),
+        UnixNanos::from(5),
+        None,
+        None,
+    );
+    engine.process_modify(&modify, account_id);
+
+    let modify_events = get_order_event_handler_messages(&order_event_handler);
+    let updated = match modify_events.first() {
+        Some(OrderEventAny::Updated(updated)) => updated,
+        event => panic!("Expected OrderUpdated event, was {event:?}"),
+    };
+
+    assert_eq!(modify_events.len(), 1);
+    assert_eq!(updated.client_order_id, client_order_id);
+    assert_eq!(updated.trigger_price, Some(trigger_price));
+    assert!(engine.order_exists(client_order_id));
+
+    clear_order_event_handler_messages(&order_event_handler);
+    let trigger_trade = TradeTick::new(
+        instrument_eth_usdt.id(),
+        trigger_price,
+        Quantity::from("1.000"),
+        aggressor_side,
+        TradeId::new("trigger"),
+        UnixNanos::from(6),
+        UnixNanos::from(6),
+    );
+    engine.process_trade_tick(&trigger_trade);
+
+    let saved_messages = get_order_event_handler_messages(&order_event_handler);
+    let fill = saved_messages
+        .iter()
+        .find_map(|event| match event {
+            OrderEventAny::Filled(fill) => Some(fill),
+            _ => None,
+        })
+        .expect("Expected LAST_PRICE trade to fill the stop-style order");
+
+    assert_eq!(fill.client_order_id, client_order_id);
+    assert!(!engine.order_exists(client_order_id));
+}
+
+#[rstest]
 fn test_process_stop_limit_order_triggered_not_filled(
     instrument_eth_usdt: InstrumentAny,
     order_event_handler: TypedIntoMessageSavingHandler<OrderEventAny>,
@@ -3583,7 +3735,7 @@ fn test_update_stop_limit_order_valid_update_not_triggered(
 
     // Create BUY STOP LIMIT order which is not activated as trigger price of 1505.00 is above current ask of 1500.00
     let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
-    let mut stop_market_order = OrderTestBuilder::new(OrderType::StopMarket)
+    let mut stop_market_order = OrderTestBuilder::new(OrderType::StopLimit)
         .instrument_id(instrument_eth_usdt.id())
         .side(OrderSide::Buy)
         .price(Price::from("1502.00"))
@@ -8572,6 +8724,142 @@ fn test_bar_adaptive_ordering_fills_low_side_first(
     assert_eq!(fills[1].client_order_id, buy_id, "BUY should fill second");
 }
 
+#[rstest]
+fn test_quote_bar_adaptive_ordering_fills_low_side_first(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: TypedIntoMessageSavingHandler<OrderEventAny>,
+    account_id: AccountId,
+) {
+    let config = OrderMatchingEngineConfig {
+        bar_execution: true,
+        bar_adaptive_high_low_ordering: true,
+        ..Default::default()
+    };
+    let mut engine =
+        get_order_matching_engine(instrument_eth_usdt.clone(), None, None, None, Some(config));
+
+    // Set initial market
+    let quote = QuoteTick::new(
+        instrument_eth_usdt.id(),
+        Price::from("1500.00"),
+        Price::from("1500.00"),
+        Quantity::from("1.000"),
+        Quantity::from("1.000"),
+        UnixNanos::from(1u64),
+        UnixNanos::from(1u64),
+    );
+    engine.process_quote_tick(&quote);
+
+    let buy_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+    let mut buy_stop = OrderTestBuilder::new(OrderType::StopMarket)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .trigger_price(Price::from("1510.00"))
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(buy_id)
+        .submit(true)
+        .build();
+    engine.process_order(&mut buy_stop, account_id);
+
+    let sell_id = ClientOrderId::from("O-19700101-000000-001-001-2");
+    let mut sell_stop = OrderTestBuilder::new(OrderType::StopMarket)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Sell)
+        .trigger_price(Price::from("1490.00"))
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(sell_id)
+        .submit(true)
+        .build();
+    engine.process_order(&mut sell_stop, account_id);
+
+    clear_order_event_handler_messages(&order_event_handler);
+
+    // BID/ASK bar pair with open closer to low: |H-O|=22 > |L-O|=18 -> L processed first
+    let bid_bar = Bar {
+        bar_type: BarType::from("ETHUSDT-PERP.BINANCE-1-MINUTE-BID-EXTERNAL"),
+        open: Price::from("1498.00"),
+        high: Price::from("1520.00"),
+        low: Price::from("1480.00"),
+        close: Price::from("1500.00"),
+        volume: Quantity::from("100.000"),
+        ts_event: UnixNanos::from(2u64),
+        ts_init: UnixNanos::from(2u64),
+    };
+    let ask_bar = Bar {
+        bar_type: BarType::from("ETHUSDT-PERP.BINANCE-1-MINUTE-ASK-EXTERNAL"),
+        open: Price::from("1498.00"),
+        high: Price::from("1520.00"),
+        low: Price::from("1480.00"),
+        close: Price::from("1500.00"),
+        volume: Quantity::from("100.000"),
+        ts_event: UnixNanos::from(2u64),
+        ts_init: UnixNanos::from(2u64),
+    };
+    engine.process_bar(&bid_bar);
+    engine.process_bar(&ask_bar);
+
+    // With adaptive ordering the low leg processes before the high leg, so the
+    // SELL stop (triggered on the low) fills before the BUY stop (v1 parity)
+    let saved_messages = get_order_event_handler_messages(&order_event_handler);
+    let fills: Vec<&OrderFilled> = saved_messages
+        .iter()
+        .filter_map(|e| match e {
+            OrderEventAny::Filled(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(fills.len(), 2, "Both stops should fill");
+    assert_eq!(
+        fills[0].client_order_id, sell_id,
+        "SELL should fill first (low processed before high)"
+    );
+    assert_eq!(fills[1].client_order_id, buy_id, "BUY should fill second");
+}
+
+#[rstest]
+fn test_reset_clears_cached_quote_bars(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: TypedIntoMessageSavingHandler<OrderEventAny>,
+) {
+    let _ = order_event_handler;
+    let config = OrderMatchingEngineConfig {
+        bar_execution: true,
+        ..Default::default()
+    };
+    let mut engine = get_order_matching_engine(instrument_eth_usdt, None, None, None, Some(config));
+
+    // Cache one side of a quote-bar pair, then reset
+    let bid_bar = Bar {
+        bar_type: BarType::from("ETHUSDT-PERP.BINANCE-1-MINUTE-BID-EXTERNAL"),
+        open: Price::from("1498.00"),
+        high: Price::from("1520.00"),
+        low: Price::from("1480.00"),
+        close: Price::from("1500.00"),
+        volume: Quantity::from("100.000"),
+        ts_event: UnixNanos::from(2u64),
+        ts_init: UnixNanos::from(2u64),
+    };
+    engine.process_bar(&bid_bar);
+    engine.reset();
+
+    // The opposite side arriving with the same timestamp must not pair with the
+    // stale pre-reset bid bar
+    let ask_bar = Bar {
+        bar_type: BarType::from("ETHUSDT-PERP.BINANCE-1-MINUTE-ASK-EXTERNAL"),
+        open: Price::from("1499.00"),
+        high: Price::from("1521.00"),
+        low: Price::from("1481.00"),
+        close: Price::from("1501.00"),
+        volume: Quantity::from("100.000"),
+        ts_event: UnixNanos::from(2u64),
+        ts_init: UnixNanos::from(2u64),
+    };
+    engine.process_bar(&ask_bar);
+
+    assert_eq!(engine.best_bid_price(), None);
+}
+
 // L2 engine with trade_execution=false does not iterate on trade ticks
 #[ignore]
 #[rstest]
@@ -8684,7 +8972,7 @@ fn test_gtd_order_partially_filled_then_expired(
         .build();
     engine_l2.process_order_book_delta(&delta).unwrap();
 
-    // Submit GTD limit buy at 1500 for 1.000 — will partially fill 0.500
+    // Submit GTD limit buy at 1500 for 1.000 - will partially fill 0.500
     let expire_ns: u64 = 1_500_000_000_000_000_000;
     let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
     let mut limit_order = OrderTestBuilder::new(OrderType::Limit)
@@ -8870,7 +9158,7 @@ fn test_price_protection_exact_boundary_fills(
     engine_l2.process_order_book_delta(&delta1).unwrap();
     engine_l2.process_order_book_delta(&delta2).unwrap();
 
-    // Market BUY for 2.000 — should fill both levels (1500 + 1501 are both <= 1501 boundary)
+    // Market BUY for 2.000 - should fill both levels (1500 + 1501 are both <= 1501 boundary)
     let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
     let mut market_order = OrderTestBuilder::new(OrderType::Market)
         .instrument_id(instrument_eth_usdt.id())

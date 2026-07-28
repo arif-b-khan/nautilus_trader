@@ -59,6 +59,15 @@ const DEFAULT_ORDER_RATE_LIMIT: &str = "100/00:00:01";
 const RUST_RUNTIME_UNSUPPORTED: &str = "not supported by the Rust live runtime yet";
 const RATE_LIMIT_FORMAT: &str = "expected 'limit/HH:MM:SS'";
 
+pub(crate) fn validate_live_environment(environment: Environment) -> anyhow::Result<()> {
+    match environment {
+        Environment::Sandbox | Environment::Live => Ok(()),
+        Environment::Backtest => {
+            anyhow::bail!("LiveNode cannot be used with Backtest environment")
+        }
+    }
+}
+
 /// Configuration for live data engines.
 #[cfg_attr(
     feature = "python",
@@ -499,6 +508,8 @@ impl From<LiveExecEngineConfig> for ExecutionEngineConfig {
             snapshot_orders: config.snapshot_orders,
             snapshot_positions: config.snapshot_positions,
             snapshot_positions_interval_secs: config.snapshot_positions_interval_secs,
+            // Live must carry replay state so prior-cycle void corrections still resolve
+            carry_replay_events_on_reopen: true,
             allow_overfills: config.allow_overfills,
             filter_unclaimed_external_orders: config.filter_unclaimed_external_orders,
             external_clients: config.external_clients,
@@ -740,7 +751,7 @@ pub struct LiveNodeConfig {
     /// The timeout for all clients to connect and initialize.
     #[builder(default = Duration::from_mins(1))]
     pub timeout_connection: Duration,
-    /// The timeout for execution state to reconcile.
+    /// The timeout for startup reconciliation and each continuous report-collection task.
     #[builder(default = Duration::from_secs(30))]
     pub timeout_reconciliation: Duration,
     /// The timeout for portfolio to initialize margins and unrealized pnls.
@@ -1312,6 +1323,8 @@ mod tests {
         assert_eq!(converted.purge_closed_positions_buffer_mins, Some(2));
         assert_eq!(converted.purge_account_events_interval_mins, Some(15));
         assert_eq!(converted.purge_account_events_lookback_mins, Some(3));
+        // Pinned on for live regardless of the `ExecutionEngineConfig` default
+        assert!(converted.carry_replay_events_on_reopen);
     }
 
     #[rstest]

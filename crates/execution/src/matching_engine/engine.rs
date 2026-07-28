@@ -272,6 +272,8 @@ impl OrderMatchingEngine {
         self.tob_initialized = false;
         self.last_quote_bid = None;
         self.last_quote_ask = None;
+        self.last_bar_bid = None;
+        self.last_bar_ask = None;
         self.precision_mismatch_streak = 0;
         self.instrument_close = None;
         self.pending_resolution = false;
@@ -702,6 +704,7 @@ impl OrderMatchingEngine {
                     .borrow()
                     .order(&client_order_id)
                     .is_some_and(|o| o.order_side() == deleted_side);
+
                 if matches_side {
                     self.reduce_queue_ahead(client_order_id, order_price_raw, ahead_raw, 0);
                 }
@@ -1221,6 +1224,7 @@ impl OrderMatchingEngine {
                 .borrow()
                 .order(&client_order_id)
                 .map(|o| o.clone());
+
             if let Some(order) = order
                 && (order.is_inflight() || order.is_open())
             {
@@ -1566,6 +1570,15 @@ impl OrderMatchingEngine {
     pub fn process_bar(&mut self, bar: &Bar) {
         log::debug!("Processing {bar}");
 
+        debug_assert!(
+            bar.high >= bar.open
+                && bar.high >= bar.low
+                && bar.high >= bar.close
+                && bar.low <= bar.open
+                && bar.low <= bar.close,
+            "OHLC invariant violated for {bar}"
+        );
+
         // Check if configured for bar execution can only process an L1 book with bars
         if !self.config.bar_execution || self.book_type != BookType::L1_MBP {
             return;
@@ -1841,36 +1854,48 @@ impl OrderMatchingEngine {
             return;
         }
 
-        // High: fill at trigger price (market moving through prices)
-        self.fill_at_market = false;
-        quote_tick.bid_price = bid_bar.high;
-        quote_tick.ask_price = ask_bar.high;
-        quote_tick.bid_size = bid_sizes.high;
-        quote_tick.ask_size = ask_sizes.high;
+        // Determine high/low processing order from the bid bar (v1 parity).
+        // Default: O > H > L > C. With adaptive ordering, swap if low is closer to open
+        let high_first = !self.config.bar_adaptive_high_low_ordering
+            || (bid_bar.high.raw - bid_bar.open.raw).abs()
+                < (bid_bar.low.raw - bid_bar.open.raw).abs();
 
-        if !self.process_bar_quote_tick(
-            &quote_tick,
+        let high_leg = (
+            bid_bar.high,
+            ask_bar.high,
+            bid_sizes.high,
+            ask_sizes.high,
             "bar high quote tick",
-            &mut has_current_bid,
-            &mut has_current_ask,
-        ) {
-            return;
-        }
-
-        // Low: fill at trigger price (market moving through prices)
-        self.fill_at_market = false;
-        quote_tick.bid_price = bid_bar.low;
-        quote_tick.ask_price = ask_bar.low;
-        quote_tick.bid_size = bid_sizes.low;
-        quote_tick.ask_size = ask_sizes.low;
-
-        if !self.process_bar_quote_tick(
-            &quote_tick,
+        );
+        let low_leg = (
+            bid_bar.low,
+            ask_bar.low,
+            bid_sizes.low,
+            ask_sizes.low,
             "bar low quote tick",
-            &mut has_current_bid,
-            &mut has_current_ask,
-        ) {
-            return;
+        );
+        let legs = if high_first {
+            [high_leg, low_leg]
+        } else {
+            [low_leg, high_leg]
+        };
+
+        // High/low: fill at trigger price (market moving through prices)
+        for (bid_price, ask_price, bid_size, ask_size, context) in legs {
+            self.fill_at_market = false;
+            quote_tick.bid_price = bid_price;
+            quote_tick.ask_price = ask_price;
+            quote_tick.bid_size = bid_size;
+            quote_tick.ask_size = ask_size;
+
+            if !self.process_bar_quote_tick(
+                &quote_tick,
+                context,
+                &mut has_current_bid,
+                &mut has_current_ask,
+            ) {
+                return;
+            }
         }
 
         // Close: fill at trigger price (market moving through prices)
@@ -3673,6 +3698,7 @@ impl OrderMatchingEngine {
             .borrow()
             .order(&client_order_id)
             .map(|o| o.clone());
+
         if let Some(mut updated_order) = updated_order {
             self.accept_order(&mut updated_order);
         }
@@ -3683,10 +3709,11 @@ impl OrderMatchingEngine {
             .trigger_price()
             .expect("Stop order must have a trigger price");
 
-        if self
-            .core
-            .is_stop_matched(order.order_side_specified(), stop_px)
-        {
+        if self.core.is_stop_matched_with_trigger_type(
+            order.order_side_specified(),
+            stop_px,
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             if self.config.reject_stop_orders {
                 self.generate_order_rejected(
                     order,
@@ -3737,10 +3764,11 @@ impl OrderMatchingEngine {
             .trigger_price()
             .expect("Stop order must have a trigger price");
 
-        if self
-            .core
-            .is_stop_matched(order.order_side_specified(), stop_px)
-        {
+        if self.core.is_stop_matched_with_trigger_type(
+            order.order_side_specified(),
+            stop_px,
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             if self.config.reject_stop_orders {
                 self.generate_order_rejected(
                     order,
@@ -3779,10 +3807,11 @@ impl OrderMatchingEngine {
     }
 
     fn process_market_if_touched_order(&mut self, order: &mut OrderAny) {
-        if self
-            .core
-            .is_touch_triggered(order.order_side_specified(), order.trigger_price().unwrap())
-        {
+        if self.core.is_touch_triggered_with_trigger_type(
+            order.order_side_specified(),
+            order.trigger_price().unwrap(),
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             if self.config.reject_stop_orders {
                 self.generate_order_rejected(
                     order,
@@ -3829,10 +3858,11 @@ impl OrderMatchingEngine {
     }
 
     fn process_limit_if_touched_order(&mut self, order: &mut OrderAny) {
-        if self
-            .core
-            .is_touch_triggered(order.order_side_specified(), order.trigger_price().unwrap())
-        {
+        if self.core.is_touch_triggered_with_trigger_type(
+            order.order_side_specified(),
+            order.trigger_price().unwrap(),
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             if self.config.reject_stop_orders {
                 self.generate_order_rejected(
                     order,
@@ -3895,9 +3925,11 @@ impl OrderMatchingEngine {
 
     fn process_trailing_stop_order(&mut self, order: &mut OrderAny) {
         if let Some(trigger_price) = order.trigger_price()
-            && self
-                .core
-                .is_stop_matched(order.order_side_specified(), trigger_price)
+            && self.core.is_stop_matched_with_trigger_type(
+                order.order_side_specified(),
+                trigger_price,
+                order.trigger_type().unwrap_or(TriggerType::Default),
+            )
         {
             self.generate_order_rejected(
                     order,
@@ -5496,10 +5528,11 @@ impl OrderMatchingEngine {
         quantity: Quantity,
         trigger_price: Price,
     ) -> ModifyOutcome {
-        if self
-            .core
-            .is_stop_matched(order.order_side_specified(), trigger_price)
-        {
+        if self.core.is_stop_matched_with_trigger_type(
+            order.order_side_specified(),
+            trigger_price,
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             self.generate_order_modify_rejected(
                 order.trader_id(),
                 order.strategy_id(),
@@ -5577,10 +5610,11 @@ impl OrderMatchingEngine {
             }
         } else {
             // Update stop price
-            if self
-                .core
-                .is_stop_matched(order.order_side_specified(), trigger_price)
-            {
+            if self.core.is_stop_matched_with_trigger_type(
+                order.order_side_specified(),
+                trigger_price,
+                order.trigger_type().unwrap_or(TriggerType::Default),
+            ) {
                 self.generate_order_modify_rejected(
                     order.trader_id(),
                     order.strategy_id(),
@@ -5618,10 +5652,11 @@ impl OrderMatchingEngine {
         quantity: Quantity,
         trigger_price: Price,
     ) -> ModifyOutcome {
-        if self
-            .core
-            .is_touch_triggered(order.order_side_specified(), trigger_price)
-        {
+        if self.core.is_touch_triggered_with_trigger_type(
+            order.order_side_specified(),
+            trigger_price,
+            order.trigger_type().unwrap_or(TriggerType::Default),
+        ) {
             self.generate_order_modify_rejected(
                 order.trader_id(),
                 order.strategy_id(),
@@ -5693,10 +5728,11 @@ impl OrderMatchingEngine {
             }
         } else {
             // Update trigger price
-            if self
-                .core
-                .is_touch_triggered(order.order_side_specified(), trigger_price)
-            {
+            if self.core.is_touch_triggered_with_trigger_type(
+                order.order_side_specified(),
+                trigger_price,
+                order.trigger_type().unwrap_or(TriggerType::Default),
+            ) {
                 self.generate_order_modify_rejected(
                     order.trader_id(),
                     order.strategy_id(),
@@ -5816,10 +5852,11 @@ impl OrderMatchingEngine {
             OrderType::StopLimit | OrderType::LimitIfTouched | OrderType::TrailingStopLimit
         ) && order.is_triggered().is_some_and(|triggered| triggered);
 
-        RestingOrder::new(
+        RestingOrder::new_with_trigger_type(
             order.client_order_id(),
             order.order_side().as_specified(),
             order.order_type(),
+            order.trigger_type().unwrap_or(TriggerType::Default),
             if triggered_limit_style {
                 None
             } else {

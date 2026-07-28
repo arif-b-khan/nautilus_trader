@@ -24,7 +24,7 @@ use nautilus_common::{
     cache::{Cache, CacheConfig, database::CacheDatabaseAdapter},
     clock::Clock,
     component::Component,
-    enums::Environment,
+    enums::{ComponentState, Environment},
     logging::{
         arm_shutdown_on_error, disarm_shutdown_on_error, headers, init_logging,
         logger::{LogGuard, LoggerConfig},
@@ -656,14 +656,30 @@ impl NautilusKernel {
     /// Starts the trader (strategies and actors).
     ///
     /// This should be called after clients are connected and instruments are cached.
-    pub fn start_trader(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trader or a registered component fails to start. A failed partial
+    /// start is stopped immediately before the error is returned.
+    pub fn start_trader(&mut self) -> anyhow::Result<()> {
         log::info!("Starting trader...");
         self.order_emulator.start();
 
-        if let Err(e) = Trader::start_with_component_callbacks(&self.trader) {
-            log::error!("Error starting trader: {e:?}");
+        if let Err(start_err) = Trader::start_with_component_callbacks(&self.trader) {
+            let stop_result = self.stop_trader_after_start_failure();
+            self.order_emulator.stop();
+
+            return match stop_result {
+                Ok(()) => Err(start_err),
+                Err(stop_err) => anyhow::bail!(
+                    "Failed to start trader: {start_err}; failed to stop partial trader start: \
+                     {stop_err}"
+                ),
+            };
         }
+
         log::info!("Trader started");
+        Ok(())
     }
 
     /// Stops the trader and its registered components.
@@ -685,6 +701,25 @@ impl NautilusKernel {
         }
     }
 
+    /// Stops a partially started trader without deferring managed strategy shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any active trader component cannot be stopped.
+    pub fn stop_trader_after_start_failure(&mut self) -> anyhow::Result<()> {
+        disarm_shutdown_on_error();
+
+        if !matches!(
+            self.trader.borrow().state(),
+            ComponentState::Starting | ComponentState::Running
+        ) {
+            return Ok(());
+        }
+
+        log::info!("Stopping trader immediately...");
+        self.trader.borrow_mut().stop_after_start_failure()
+    }
+
     /// Finalizes the kernel shutdown after the grace period.
     ///
     /// This method should be called after the residual events grace period has elapsed
@@ -698,6 +733,7 @@ impl NautilusKernel {
 
         // Execution and data clients are stopped by their engines via `stop_engines` below
 
+        self.portfolio.borrow_mut().finalize_equity_curve();
         self.stop_engines();
         self.cancel_timers();
 
@@ -761,8 +797,19 @@ impl NautilusKernel {
         disarm_shutdown_on_error();
         log::info!("Disposing");
 
-        if let Err(e) = self.trader.borrow_mut().dispose() {
-            log::error!("Error disposing trader: {e:?}");
+        {
+            let mut trader = self.trader.borrow_mut();
+            if trader.state() == ComponentState::PreInitialized
+                && let Err(e) = trader.initialize()
+            {
+                log::error!("Error initializing trader for disposal: {e:?}");
+            }
+
+            if !trader.is_disposed()
+                && let Err(e) = trader.dispose()
+            {
+                log::error!("Error disposing trader: {e:?}");
+            }
         }
 
         self.stop_engines();
@@ -832,9 +879,20 @@ impl NautilusKernel {
     #[expect(clippy::await_holding_refcell_ref)] // Single-threaded runtime, intentional design
     pub async fn disconnect_clients(&mut self) -> anyhow::Result<()> {
         log::info!("Disconnecting clients...");
-        self.data_engine.borrow_mut().disconnect().await?;
-        self.exec_engine.borrow_mut().disconnect().await?;
-        Ok(())
+        let mut data_engine = self.data_engine.borrow_mut();
+        let mut exec_engine = self.exec_engine.borrow_mut();
+        let (data_result, exec_result) =
+            futures::join!(data_engine.disconnect(), exec_engine.disconnect());
+
+        match (data_result, exec_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(data_err), Ok(())) => Err(data_err),
+            (Ok(()), Err(exec_err)) => Err(exec_err),
+            (Err(data_err), Err(exec_err)) => anyhow::bail!(
+                "Failed to disconnect data clients: {data_err}; failed to disconnect execution \
+                 clients: {exec_err}"
+            ),
+        }
     }
 
     /// Returns `true` if all engine clients are connected.
@@ -1023,7 +1081,7 @@ mod lifecycle_tests {
                 .get_matching_core(&instrument_id)
                 .is_none()
         );
-        kernel.start_trader();
+        kernel.start_trader().unwrap();
 
         let commands = data_commands.get_messages();
         let cache = kernel.cache.borrow();
@@ -1076,7 +1134,7 @@ mod lifecycle_tests {
             .unwrap();
 
         kernel.start();
-        kernel.start_trader();
+        kernel.start_trader().unwrap();
         assert!(
             kernel
                 .order_emulator

@@ -612,8 +612,7 @@ impl LimitOrder {
             || dict.set_item("linked_order_ids", py.None()),
             |linked_order_ids| {
                 let linked_order_ids_list =
-                    PyList::new(py, linked_order_ids.iter().map(ToString::to_string))
-                        .expect("Invalid `ExactSizeIterator`");
+                    PyList::new(py, linked_order_ids.iter().map(ToString::to_string))?;
                 dict.set_item("linked_order_ids", linked_order_ids_list)
             },
         )?;
@@ -671,7 +670,7 @@ impl LimitOrder {
         )?;
         self.avg_px.map_or_else(
             || dict.set_item("avg_px", py.None()),
-            |x| dict.set_item("avg_px", x),
+            |x| dict.set_item("avg_px", x.to_string()),
         )?;
         Ok(dict.into())
     }

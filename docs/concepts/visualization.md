@@ -104,17 +104,17 @@ backtests so return charts use the selected currency.
 
 The tearsheet can include any combination of the following built-in charts:
 
-| Chart Name         | Type         | Description                                              |
-|--------------------|--------------|----------------------------------------------------------|
-| `run_info`         | Table        | Run metadata and account balances.                       |
-| `stats_table`      | Table        | Performance statistics (PnL, returns, general metrics).  |
-| `equity`           | Line         | Cumulative returns over time with optional benchmark.    |
-| `drawdown`         | Area         | Drawdown percentage from peak equity.                    |
-| `monthly_returns`  | Heatmap      | Monthly portfolio return percentages organized by year.  |
-| `distribution`     | Histogram    | Distribution of individual return values.                |
-| `rolling_sharpe`   | Line         | 60-day rolling Sharpe ratio.                             |
-| `yearly_returns`   | Bar          | Annual return percentages.                               |
-| `bars_with_fills`  | Candlestick  | Price bars (OHLC) with order fills overlaid as markers.  |
+| Chart Name        | Type        | Description                                             |
+| ----------------- | ----------- | ------------------------------------------------------- |
+| `run_info`        | Table       | Run metadata and account balances.                      |
+| `stats_table`     | Table       | Performance statistics (PnL, returns, general metrics). |
+| `equity`          | Line        | Cumulative returns over time with optional benchmark.   |
+| `drawdown`        | Area        | Drawdown percentage from peak equity.                   |
+| `monthly_returns` | Heatmap     | Monthly portfolio return percentages organized by year. |
+| `distribution`    | Histogram   | Distribution of individual return values.               |
+| `rolling_sharpe`  | Line        | 60-day rolling Sharpe ratio.                            |
+| `yearly_returns`  | Bar         | Annual return percentages.                              |
+| `bars_with_fills` | Candlestick | Price bars (OHLC) with order fills overlaid as markers. |
 
 All charts are registered in the chart registry and are configured via chart objects in
 `TearsheetConfig.charts` (each chart object maps to a built-in chart name).
@@ -196,12 +196,12 @@ current equity; otherwise later periods inflate as the running balance grows.
 Themes control the visual styling of charts including colors, fonts, and backgrounds.
 NautilusTrader provides four built-in themes:
 
-| Theme Name      | Description                                    | Use Case                       |
-|-----------------|------------------------------------------------|--------------------------------|
-| `plotly_white`  | Clean light theme with dark gray headers.      | Default, professional reports. |
-| `plotly_dark`   | Dark background with standard Plotly colors.   | Low‑light environments.        |
-| `nautilus`      | Light theme with NautilusTrader brand colors.  | Official light mode.           |
-| `nautilus_dark` | Dark theme with teal/cyan signature colors.    | Official dark mode.            |
+| Theme Name      | Description                                   | Use Case                       |
+| --------------- | --------------------------------------------- | ------------------------------ |
+| `plotly_white`  | Clean light theme with dark gray headers.     | Default, professional reports. |
+| `plotly_dark`   | Dark background with standard Plotly colors.  | Low‑light environments.        |
+| `nautilus`      | Light theme with NautilusTrader brand colors. | Official light mode.           |
+| `nautilus_dark` | Dark theme with teal/cyan signature colors.   | Official dark mode.            |
 
 ### Selecting a theme
 
@@ -223,18 +223,18 @@ register_theme(
     name="corporate",
     template="plotly_white",  # Base Plotly template
     colors={
-        "primary": "#003366",      # Navy blue
-        "positive": "#2e8b57",     # Sea green
-        "negative": "#c41e3a",     # Cardinal red
-        "neutral": "#808080",      # Gray
-        "background": "#ffffff",   # White
-        "grid": "#e5e5e5",         # Light gray
+        "primary": "#003366",  # Navy blue
+        "positive": "#2e8b57",  # Sea green
+        "negative": "#c41e3a",  # Cardinal red
+        "neutral": "#808080",  # Gray
+        "background": "#ffffff",  # White
+        "grid": "#e5e5e5",  # Light gray
         # Optional table colors (defaults will be provided if omitted)
         "table_section": "#e5e5e5",
         "table_row_odd": "#f8f8f8",
         "table_row_even": "#ffffff",
         "table_text": "#000000",
-    }
+    },
 )
 
 # Use the custom theme
@@ -280,7 +280,7 @@ config = TearsheetConfig(
 ### Configuration parameters
 
 | Parameter           | Type                   | Default          | Description                         |
-|---------------------|------------------------|------------------|-------------------------------------|
+| ------------------- | ---------------------- | ---------------- | ----------------------------------- |
 | `charts`            | `list[TearsheetChart]` | Built‑ins        | Charts to include, in order.        |
 | `theme`             | `str`                  | `"plotly_white"` | Theme name for styling.             |
 | `layout`            | `GridLayout`           | `None`           | Custom subplot grid layout.         |
@@ -305,6 +305,7 @@ render traces onto a Plotly figure object.
 from nautilus_trader.analysis.tearsheet import register_chart
 import plotly.graph_objects as go
 
+
 def my_custom_chart(returns, output_path=None, title="Custom Chart", theme="plotly_white"):
     """
     Create a custom visualization.
@@ -317,13 +318,15 @@ def my_custom_chart(returns, output_path=None, title="Custom Chart", theme="plot
 
     # Create your visualization
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=returns.index,
-        y=returns.cumsum(),
-        mode="lines",
-        name="Custom Metric",
-        line={"color": theme_config["colors"]["primary"]},
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=returns.index,
+            y=returns.cumsum(),
+            mode="lines",
+            name="Custom Metric",
+            line={"color": theme_config["colors"]["primary"]},
+        )
+    )
 
     fig.update_layout(
         title=title,
@@ -336,6 +339,7 @@ def my_custom_chart(returns, output_path=None, title="Custom Chart", theme="plot
         fig.write_html(output_path)
 
     return fig
+
 
 # Register the chart for standalone use (via `get_chart()` / `list_charts()`)
 register_chart("my_custom", my_custom_chart)
@@ -354,6 +358,7 @@ from nautilus_trader.analysis import TearsheetCustomChart
 from nautilus_trader.analysis import TearsheetEquityChart
 from nautilus_trader.analysis import TearsheetStatsTableChart
 from nautilus_trader.analysis import register_tearsheet_chart
+
 
 def _render_my_metric(fig, row, col, returns, theme_config, **kwargs):
     """
@@ -390,6 +395,7 @@ def _render_my_metric(fig, row, col, returns, theme_config, **kwargs):
 
     fig.update_xaxes(title_text="Date", row=row, col=col)
     fig.update_yaxes(title_text="Volatility (%)", row=row, col=col)
+
 
 # Register for tearsheet use
 register_tearsheet_chart(

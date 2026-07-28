@@ -854,23 +854,18 @@ impl PyCache {
     }
 
     #[pyo3(name = "order_list")]
-    fn py_order_list(&self, py: Python, order_list_id: OrderListId) -> PyResult<Option<Py<PyAny>>> {
-        let cache = self.0.borrow();
-        match cache.order_list(&order_list_id) {
-            Some(order_list) => Ok(Some(order_list.clone().into_pyobject(py)?.into())),
-            None => Ok(None),
-        }
+    fn py_order_list(&self, order_list_id: OrderListId) -> Option<OrderList> {
+        self.0.borrow().order_list(&order_list_id).cloned()
     }
 
     #[pyo3(name = "order_lists", signature = (venue=None, instrument_id=None, strategy_id=None, account_id=None))]
     fn py_order_lists(
         &self,
-        py: Python,
         venue: Option<Venue>,
         instrument_id: Option<InstrumentId>,
         strategy_id: Option<StrategyId>,
         account_id: Option<AccountId>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
+    ) -> Vec<OrderList> {
         let cache = self.0.borrow();
         cache
             .order_lists(
@@ -880,7 +875,7 @@ impl PyCache {
                 account_id.as_ref(),
             )
             .into_iter()
-            .map(|ol| Ok(ol.clone().into_pyobject(py)?.into()))
+            .cloned()
             .collect()
     }
 
@@ -1159,7 +1154,6 @@ impl PyCache {
         self.0
             .borrow_mut()
             .snapshot_position(&position_obj)
-            .map(|_| ())
             .map_err(to_pyvalue_err)
     }
 
@@ -1176,6 +1170,45 @@ impl PyCache {
             .into_iter()
             .map(|p| Ok(p.into_pyobject(py)?.into()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_core::UnixNanos;
+    use rstest::rstest;
+
+    use super::*;
+
+    fn create_order_list() -> OrderList {
+        OrderList::new(
+            OrderListId::from("OL-001"),
+            InstrumentId::from("AUD/USD.SIM"),
+            StrategyId::from("S-001"),
+            vec![ClientOrderId::from("O-001")],
+            UnixNanos::from(42_u64),
+        )
+    }
+
+    #[rstest]
+    fn test_order_list_queries_preserve_concrete_type() {
+        let order_list = create_order_list();
+        let order_list_id = order_list.id;
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        cache
+            .borrow_mut()
+            .add_order_list(order_list.clone())
+            .unwrap();
+        let py_cache = PyCache::from_rc(cache);
+
+        assert_eq!(
+            py_cache.py_order_list(order_list_id),
+            Some(order_list.clone()),
+        );
+        assert_eq!(
+            py_cache.py_order_lists(None, None, None, None),
+            vec![order_list],
+        );
     }
 }
 
@@ -1656,8 +1689,13 @@ impl Cache {
             .map_err(to_pyvalue_err)
     }
 
-    /// Creates a snapshot of the `position` by cloning it, assigning a new ID,
-    /// serializing it, and storing it in the position snapshots.
+    /// Creates a snapshot of the `position` by cloning it, assigning a new ID, and storing it
+    /// in the position snapshots.
+    ///
+    /// The copy excludes `replay_events` and `fill_voids`, which no snapshot consumer reads,
+    /// so snapshot size stays independent of the fills applied to the position ID. The copy
+    /// encodes only when a consumer asks for the bytes, so this call stays off the encode path
+    /// unless a backing database has to persist the frame.
     ///
     /// # Errors
     ///
@@ -1667,7 +1705,6 @@ impl Cache {
     fn py_snapshot_position(&mut self, py: Python, position: Py<PyAny>) -> PyResult<()> {
         let position_obj = position.extract::<Position>(py)?;
         self.snapshot_position(&position_obj)
-            .map(|_| ())
             .map_err(to_pyvalue_err)
     }
 
@@ -2526,7 +2563,7 @@ impl Cache {
     /// Gets the serialized position snapshot frames for the `position_id`.
     ///
     /// Each element in the returned vector is one JSON-encoded `Position` snapshot,
-    /// in the order they were taken.
+    /// in the order they were taken. Frames that fail to serialize are skipped with a warning.
     #[pyo3(name = "position_snapshot_bytes")]
     fn py_position_snapshot_bytes(&self, position_id: PositionId) -> Option<Vec<Vec<u8>>> {
         self.position_snapshot_bytes(&position_id)
@@ -2536,7 +2573,6 @@ impl Cache {
     ///
     /// When `position_id` is `Some`, only snapshots for that position are returned.
     /// When `account_id` is `Some`, snapshots are filtered to that account.
-    /// Frames that fail to deserialize are skipped with a warning.
     #[pyo3(name = "position_snapshots", signature = (position_id=None, account_id=None))]
     fn py_position_snapshots(
         &self,

@@ -59,7 +59,7 @@ use nautilus_model::{
         builder::OrderTestBuilder,
         stubs::{TestOrderEventStubs, TestOrdersGenerator},
     },
-    position::Position,
+    position::{Position, PositionReplayEvent},
     stubs::TestDefault,
     types::{AccountBalance, Currency, Money, Price, Quantity},
 };
@@ -429,6 +429,90 @@ fn test_cache_api_returns_owned_snapshots_for_populated_queries(mut cache: Cache
 #[rstest]
 fn test_build_index_when_empty(mut cache: Cache) {
     cache.build_index();
+}
+
+#[rstest]
+fn test_oms_type_returns_actual_position_oms(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+
+    cache.add_position(&position, OmsType::Hedging).unwrap();
+
+    assert_eq!(cache.oms_type(&position_id), Some(OmsType::Hedging));
+
+    cache.clear_index();
+    cache.build_index();
+
+    assert_eq!(cache.oms_type(&position_id), Some(OmsType::Hedging));
+}
+
+#[rstest]
+fn test_cache_positions_loads_persisted_position_oms() {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let database = SnapshotBlobTestDatabase::with_position_oms(position, OmsType::Hedging);
+    let mut cache = Cache::default();
+    cache.set_database(Box::new(database));
+
+    futures::executor::block_on(cache.cache_positions()).unwrap();
+
+    assert_eq!(cache.oms_type(&position_id), Some(OmsType::Hedging));
+}
+
+#[rstest]
+fn test_cache_positions_without_persisted_oms_remains_unspecified() {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let database = SnapshotBlobTestDatabase {
+        positions: AHashMap::from([(position_id, position)]),
+        ..Default::default()
+    };
+    let mut cache = Cache::default();
+    cache.set_database(Box::new(database));
+
+    futures::executor::block_on(cache.cache_positions()).unwrap();
+
+    assert_eq!(cache.oms_type(&position_id), None);
+}
+
+#[rstest]
+fn test_cache_positions_infers_legacy_netting_oms() {
+    let mut position = snapshot_test_position();
+    position.id = PositionId::new(format!(
+        "{}-{}",
+        position.instrument_id, position.strategy_id
+    ));
+    let position_id = position.id;
+    let database = SnapshotBlobTestDatabase {
+        positions: AHashMap::from([(position_id, position)]),
+        ..Default::default()
+    };
+    let mut cache = Cache::default();
+    cache.set_database(Box::new(database));
+
+    futures::executor::block_on(cache.cache_positions()).unwrap();
+
+    assert_eq!(cache.oms_type(&position_id), Some(OmsType::Netting));
+}
+
+#[rstest]
+fn test_cache_positions_skips_malformed_position_oms() {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let database = SnapshotBlobTestDatabase {
+        general: AHashMap::from([(
+            super::position_oms_key(position_id),
+            Bytes::from_static(b"invalid"),
+        )]),
+        positions: AHashMap::from([(position_id, position)]),
+        fail_add: false,
+    };
+    let mut cache = Cache::default();
+    cache.set_database(Box::new(database));
+
+    futures::executor::block_on(cache.cache_positions()).unwrap();
+
+    assert_eq!(cache.oms_type(&position_id), None);
 }
 
 #[rstest]
@@ -1387,7 +1471,7 @@ fn test_client_order_ids_filtering(mut cache: Cache) {
         cache.add_order(order.clone(), None, None, false).unwrap();
     }
 
-    // No filters – expect all orders
+    // No filters - expect all orders
     assert_eq!(
         cache.client_order_ids(None, None, None, None).len(),
         orders.len()
@@ -3739,6 +3823,551 @@ fn test_purge_order() {
 }
 
 #[rstest]
+fn test_purge_order_cleans_command_position_link() {
+    let mut cache = Cache::default();
+    let position_id = PositionId::new("P-COMMAND");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    assert!(order.position_id().is_none());
+    cache
+        .add_order(order, Some(position_id), None, false)
+        .unwrap();
+
+    cache.purge_order(client_order_id);
+
+    assert!(cache.orders_for_position(&position_id).is_empty());
+}
+
+#[rstest]
+fn test_purge_order_removes_historical_venue_order_ids() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let account_id = AccountId::new("SIM-001");
+    let original_venue_order_id = VenueOrderId::new("V-ORIGINAL");
+    let updated_venue_order_id = VenueOrderId::new("V-UPDATED");
+    let mut order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .price(Price::from("1.00000"))
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    cache.add_order(order.clone(), None, None, false).unwrap();
+    let submitted = TestOrderEventStubs::submitted(&order, account_id);
+    update_order_with_event(&mut cache, &mut order, submitted);
+    let accepted = TestOrderEventStubs::accepted(&order, account_id, original_venue_order_id);
+    update_order_with_event(&mut cache, &mut order, accepted);
+    let updated = build_order_updated(
+        order.trader_id(),
+        order.strategy_id(),
+        order.instrument_id(),
+        client_order_id,
+        order.quantity(),
+        Some(updated_venue_order_id),
+        Some(account_id),
+        order.price(),
+        None,
+        None,
+    );
+    update_order_with_event(&mut cache, &mut order, OrderEventAny::Updated(updated));
+    let canceled = build_order_canceled(
+        order.trader_id(),
+        order.strategy_id(),
+        order.instrument_id(),
+        client_order_id,
+        Some(updated_venue_order_id),
+        Some(account_id),
+    );
+    update_order_with_event(&mut cache, &mut order, OrderEventAny::Canceled(canceled));
+
+    cache.purge_order(client_order_id);
+
+    assert!(cache.client_order_id(&original_venue_order_id).is_none());
+    assert!(cache.client_order_id(&updated_venue_order_id).is_none());
+    assert!(cache.check_integrity());
+}
+
+#[rstest]
+fn test_purge_order_preserves_rebound_historical_venue_order_id() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let account_id = AccountId::new("SIM-001");
+    let historical_venue_order_id = VenueOrderId::new("V-HISTORICAL");
+    let current_venue_order_id = VenueOrderId::new("V-CURRENT");
+    let mut former_owner = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .price(Price::from("1.00000"))
+        .quantity(Quantity::from(100_000))
+        .build();
+    let former_owner_id = former_owner.client_order_id();
+    cache
+        .add_order(former_owner.clone(), None, None, false)
+        .unwrap();
+    let submitted = TestOrderEventStubs::submitted(&former_owner, account_id);
+    update_order_with_event(&mut cache, &mut former_owner, submitted);
+    let accepted =
+        TestOrderEventStubs::accepted(&former_owner, account_id, historical_venue_order_id);
+    update_order_with_event(&mut cache, &mut former_owner, accepted);
+    let updated = build_order_updated(
+        former_owner.trader_id(),
+        former_owner.strategy_id(),
+        former_owner.instrument_id(),
+        former_owner_id,
+        former_owner.quantity(),
+        Some(current_venue_order_id),
+        Some(account_id),
+        former_owner.price(),
+        None,
+        None,
+    );
+    update_order_with_event(
+        &mut cache,
+        &mut former_owner,
+        OrderEventAny::Updated(updated),
+    );
+    let canceled = build_order_canceled(
+        former_owner.trader_id(),
+        former_owner.strategy_id(),
+        former_owner.instrument_id(),
+        former_owner_id,
+        Some(current_venue_order_id),
+        Some(account_id),
+    );
+    update_order_with_event(
+        &mut cache,
+        &mut former_owner,
+        OrderEventAny::Canceled(canceled),
+    );
+
+    let rebound_owner = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Sell)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-REBOUND"))
+        .build();
+    let rebound_owner_id = rebound_owner.client_order_id();
+    cache.add_order(rebound_owner, None, None, false).unwrap();
+    cache
+        .index
+        .venue_order_ids
+        .insert(historical_venue_order_id, rebound_owner_id);
+    cache
+        .index
+        .client_order_ids
+        .insert(rebound_owner_id, historical_venue_order_id);
+
+    cache.purge_order(former_owner_id);
+
+    assert_eq!(
+        cache.client_order_id(&historical_venue_order_id),
+        Some(&rebound_owner_id)
+    );
+}
+
+#[rstest]
+fn test_purge_order_cleans_last_speculative_position_metadata() {
+    let mut cache = Cache::default();
+    let position_id = PositionId::new("P-SPECULATIVE");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    let strategy_id = order.strategy_id();
+    let venue = order.instrument_id().venue;
+    cache
+        .add_order(order, Some(position_id), None, false)
+        .unwrap();
+
+    cache.purge_order(client_order_id);
+
+    assert!(!cache.index.position_orders.contains_key(&position_id));
+    assert!(!cache.index.position_strategy.contains_key(&position_id));
+    assert!(
+        !cache
+            .index
+            .strategy_positions
+            .get(&strategy_id)
+            .is_some_and(|positions| positions.contains(&position_id))
+    );
+    assert!(
+        !cache
+            .index
+            .venue_positions
+            .get(&venue)
+            .is_some_and(|positions| positions.contains(&position_id))
+    );
+}
+
+#[rstest]
+fn test_purge_order_keeps_empty_bucket_for_real_position() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let position_id = PositionId::new("P-REAL");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    let strategy_id = order.strategy_id();
+    cache
+        .add_order(order.clone(), Some(position_id), None, false)
+        .unwrap();
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::new("T-REAL")),
+        Some(position_id),
+        Some(Price::from("1.00001")),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let position = Position::new(&instrument, filled.into());
+    cache.add_position(&position, OmsType::Netting).unwrap();
+
+    cache.purge_order(client_order_id);
+
+    assert!(
+        cache
+            .index
+            .position_orders
+            .get(&position_id)
+            .is_some_and(|orders| orders.is_empty())
+    );
+    assert_eq!(
+        cache.index.position_strategy.get(&position_id),
+        Some(&strategy_id)
+    );
+    assert!(
+        cache
+            .index
+            .strategy_orders
+            .get(&strategy_id)
+            .is_some_and(|orders| orders.is_empty())
+    );
+    assert!(cache.check_integrity());
+}
+
+#[rstest]
+fn test_purge_position_retires_empty_order_companion_buckets() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let instrument_id = instrument.id();
+    let position_id = PositionId::new("P-COMPANION-BUCKETS");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    let strategy_id = order.strategy_id();
+    cache
+        .add_order(order.clone(), Some(position_id), None, false)
+        .unwrap();
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::new("T-COMPANION-OPEN")),
+        Some(position_id),
+        Some(Price::from("1.00001")),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut position = Position::new(&instrument, filled.into());
+    cache.add_position(&position, OmsType::Netting).unwrap();
+
+    let closing_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_id)
+        .side(OrderSide::Sell)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-COMPANION-CLOSE"))
+        .build();
+    let closing_fill = TestOrderEventStubs::filled(
+        &closing_order,
+        &instrument,
+        Some(TradeId::new("T-COMPANION-CLOSE")),
+        Some(position_id),
+        Some(Price::from("1.00010")),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    position.apply(&closing_fill.into());
+    cache.update_position(&position).unwrap();
+    assert!(position.is_closed());
+
+    cache.purge_order(client_order_id);
+    assert!(
+        cache
+            .index
+            .instrument_orders
+            .get(&instrument_id)
+            .is_some_and(|orders| orders.is_empty())
+    );
+    assert!(
+        cache
+            .index
+            .strategy_orders
+            .get(&strategy_id)
+            .is_some_and(|orders| orders.is_empty())
+    );
+
+    cache.purge_position(position_id);
+
+    assert!(!cache.index.instrument_orders.contains_key(&instrument_id));
+    assert!(!cache.index.strategy_orders.contains_key(&strategy_id));
+    assert!(!cache.index.strategies.contains(&strategy_id));
+}
+
+#[rstest]
+fn test_purge_order_cleans_object_position_id_without_forward_entry() {
+    let mut cache = Cache::default();
+    let position_id = PositionId::new("P-OBJECT-ONLY");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    cache
+        .add_order(order, Some(position_id), None, false)
+        .unwrap();
+    cache
+        .order_mut(&client_order_id)
+        .unwrap()
+        .set_position_id(Some(position_id));
+    cache.index.order_position.remove(&client_order_id);
+
+    cache.purge_order(client_order_id);
+
+    assert!(!cache.index.position_orders.contains_key(&position_id));
+    assert!(!cache.index.position_strategy.contains_key(&position_id));
+}
+
+#[rstest]
+fn test_purge_order_cleans_current_object_venue_id_without_other_sources() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let account_id = AccountId::new("SIM-001");
+    let venue_order_id = VenueOrderId::new("V-OBJECT-ONLY");
+    let mut order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    cache.add_order(order.clone(), None, None, false).unwrap();
+    let submitted = TestOrderEventStubs::submitted(&order, account_id);
+    update_order_with_event(&mut cache, &mut order, submitted);
+    let filled = build_order_filled(
+        order.trader_id(),
+        order.strategy_id(),
+        order.instrument_id(),
+        client_order_id,
+        venue_order_id,
+        account_id,
+        TradeId::new("T-OBJECT-ONLY"),
+        order.order_side(),
+        order.order_type(),
+        order.quantity(),
+        Price::from("1.00001"),
+        instrument.quote_currency(),
+        LiquiditySide::Maker,
+        None,
+        None,
+    );
+    update_order_with_event(&mut cache, &mut order, OrderEventAny::Filled(filled));
+    assert!(order.venue_order_ids().is_empty());
+    cache.index.client_order_ids.remove(&client_order_id);
+
+    cache.purge_order(client_order_id);
+
+    assert!(cache.client_order_id(&venue_order_id).is_none());
+}
+
+#[rstest]
+fn test_purge_order_cleans_index_only_forward_venue_id() {
+    let mut cache = Cache::default();
+    let venue_order_id = VenueOrderId::new("V-INDEX-ONLY");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    assert!(order.venue_order_id().is_none());
+    cache.add_order(order, None, None, false).unwrap();
+    cache
+        .index
+        .client_order_ids
+        .insert(client_order_id, venue_order_id);
+    cache
+        .index
+        .venue_order_ids
+        .insert(venue_order_id, client_order_id);
+
+    cache.purge_order(client_order_id);
+
+    assert!(cache.client_order_id(&venue_order_id).is_none());
+}
+
+#[rstest]
+fn test_purge_order_does_not_manufacture_missing_real_position_bucket() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let position_id = PositionId::new("P-REAL-MISSING-BUCKET");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    cache
+        .add_order(order.clone(), Some(position_id), None, false)
+        .unwrap();
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::new("T-REAL-MISSING-BUCKET")),
+        Some(position_id),
+        Some(Price::from("1.00001")),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let position = Position::new(&instrument, filled.into());
+    cache.add_position(&position, OmsType::Netting).unwrap();
+    cache.index.position_orders.remove(&position_id);
+
+    cache.purge_order(client_order_id);
+
+    assert!(!cache.index.position_orders.contains_key(&position_id));
+}
+
+#[rstest]
+fn test_purge_order_preserves_speculative_metadata_when_reverse_bucket_is_missing() {
+    let mut cache = Cache::default();
+    let position_id = PositionId::new("P-SPECULATIVE-SHARED");
+    let first_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-SPECULATIVE-FIRST"))
+        .build();
+    let second_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-SPECULATIVE-SECOND"))
+        .build();
+    let first_order_id = first_order.client_order_id();
+    let second_order_id = second_order.client_order_id();
+    let strategy_id = first_order.strategy_id();
+    let venue = first_order.instrument_id().venue;
+    cache
+        .add_order(first_order, Some(position_id), None, false)
+        .unwrap();
+    cache
+        .add_order(second_order, Some(position_id), None, false)
+        .unwrap();
+    cache.index.position_orders.remove(&position_id);
+
+    cache.purge_order(first_order_id);
+
+    assert_eq!(
+        cache.index.order_position.get(&second_order_id),
+        Some(&position_id)
+    );
+    assert_eq!(
+        cache.index.position_strategy.get(&position_id),
+        Some(&strategy_id)
+    );
+    assert!(
+        cache
+            .index
+            .strategy_positions
+            .get(&strategy_id)
+            .is_some_and(|positions| positions.contains(&position_id))
+    );
+    assert!(
+        cache
+            .index
+            .venue_positions
+            .get(&venue)
+            .is_some_and(|positions| positions.contains(&position_id))
+    );
+}
+
+#[rstest]
+fn test_purge_order_preserves_exec_algorithm_when_reverse_bucket_is_missing() {
+    let mut cache = Cache::default();
+    let exec_algorithm_id = ExecAlgorithmId::new("TWAP");
+    let first_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-EXEC-FIRST"))
+        .exec_algorithm_id(exec_algorithm_id)
+        .build();
+    let second_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .client_order_id(ClientOrderId::new("O-EXEC-SECOND"))
+        .exec_algorithm_id(exec_algorithm_id)
+        .build();
+    let first_order_id = first_order.client_order_id();
+    let second_order_id = second_order.client_order_id();
+    cache.add_order(first_order, None, None, false).unwrap();
+    cache.add_order(second_order, None, None, false).unwrap();
+    cache.index.exec_algorithm_orders.remove(&exec_algorithm_id);
+
+    cache.purge_order(first_order_id);
+
+    assert!(cache.order_exists(&second_order_id));
+    assert!(cache.index.exec_algorithms.contains(&exec_algorithm_id));
+}
+
+#[rstest]
+fn test_purge_order_retires_last_strategy_and_exec_algorithm() {
+    let mut cache = Cache::default();
+    let strategy_id = StrategyId::new("S-PURGE");
+    let exec_algorithm_id = ExecAlgorithmId::new("TWAP");
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .strategy_id(strategy_id)
+        .exec_algorithm_id(exec_algorithm_id)
+        .build();
+    let client_order_id = order.client_order_id();
+    cache.add_order(order, None, None, false).unwrap();
+
+    cache.purge_order(client_order_id);
+
+    assert!(!cache.index.strategies.contains(&strategy_id));
+    assert!(!cache.index.exec_algorithms.contains(&exec_algorithm_id));
+    assert!(cache.check_integrity());
+}
+
+#[rstest]
 fn test_purge_open_order_skips_purge() {
     // Test that attempting to purge an open order is prevented by the guard
     let mut cache = Cache::default();
@@ -4459,6 +5088,107 @@ fn test_purge_order_cleans_up_strategy_orders_index() {
     // Query orders for strategy should not crash and should not include purged order
     let orders_for_strategy = cache.orders(None, None, Some(&strategy_id), None, None);
     assert!(!orders_contains(&orders_for_strategy, &order));
+}
+
+#[rstest]
+fn test_purge_order_preserves_absent_strategy_orders_bucket() {
+    let mut cache = Cache::default();
+    let audusd_sim = InstrumentAny::CurrencyPair(audusd_sim());
+    let strategy_id = StrategyId::new("S-SHARED");
+
+    let order1 = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(audusd_sim.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .strategy_id(strategy_id)
+        .client_order_id(ClientOrderId::new("O-SHARED-1"))
+        .build();
+    let order2 = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(audusd_sim.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .strategy_id(strategy_id)
+        .client_order_id(ClientOrderId::new("O-SHARED-2"))
+        .build();
+
+    let client_order_id_1 = order1.client_order_id();
+
+    cache.add_order(order1, None, None, false).unwrap();
+    cache.add_order(order2, None, None, false).unwrap();
+
+    // The inconsistent state `check_integrity` exists to report: the reverse bucket is
+    // missing while two cached orders still use the strategy.
+    cache.index.strategy_orders.remove(&strategy_id);
+
+    cache.purge_order(client_order_id_1);
+
+    assert!(
+        cache.index.strategies.contains(&strategy_id),
+        "strategy still used by a cached order must not be retired"
+    );
+    assert!(
+        !cache.index.strategy_orders.contains_key(&strategy_id),
+        "an absent reverse bucket must be left absent, not fabricated"
+    );
+    assert!(
+        !cache.check_integrity(),
+        "the missing reverse bucket must remain reportable"
+    );
+}
+
+#[rstest]
+fn test_purge_order_preserves_absent_instrument_orders_bucket() {
+    let mut cache = Cache::default();
+    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+    let instrument_id = instrument.id();
+    let position_id = PositionId::new("P-ABSENT-INSTRUMENT-BUCKET");
+
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+    let client_order_id = order.client_order_id();
+    cache
+        .add_order(order.clone(), Some(position_id), None, false)
+        .unwrap();
+
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::new("T-ABSENT-INSTRUMENT-BUCKET")),
+        Some(position_id),
+        Some(Price::from("1.00001")),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let position = Position::new(&instrument, filled.into());
+    cache.add_position(&position, OmsType::Netting).unwrap();
+
+    // The inconsistent state `check_integrity` exists to report: the instrument keeps an
+    // open position while its orders bucket has gone missing.
+    cache.index.instrument_orders.remove(&instrument_id);
+
+    cache.purge_order(client_order_id);
+
+    assert!(
+        !cache.index.instrument_orders.contains_key(&instrument_id),
+        "an absent instrument bucket must be left absent, not fabricated"
+    );
+    assert!(
+        cache
+            .index
+            .instrument_positions
+            .contains_key(&instrument_id),
+        "the live position must still be indexed"
+    );
+    assert!(
+        !cache.check_integrity(),
+        "the missing instrument bucket must remain reportable"
+    );
 }
 
 #[rstest]
@@ -5612,7 +6342,7 @@ fn test_position_snapshots_round_trip(mut cache: Cache) {
     let position_id = position.id;
     let account_id = position.account_id;
 
-    let first_ref = cache.snapshot_position(&position).unwrap();
+    let first_ref = cache.snapshot_position_encoded(&position).unwrap();
     cache.snapshot_position(&position).unwrap();
     cache.snapshot_position(&position).unwrap();
 
@@ -5621,7 +6351,7 @@ fn test_position_snapshots_round_trip(mut cache: Cache) {
     assert_eq!(frames.len(), 3);
     assert_eq!(
         first_ref.blob_ref,
-        format!("cache://position-snapshots/{}/0", position_id.as_str()),
+        position_snapshot_blob_ref(&position_id, 0),
     );
     assert_eq!(first_ref.blob.as_ref(), frames[0].as_slice());
     assert_eq!(
@@ -5655,6 +6385,38 @@ fn test_position_snapshots_round_trip(mut cache: Cache) {
     );
 }
 
+#[rstest]
+fn test_position_snapshot_blobs_exclude_replay_state(mut cache: Cache) {
+    let mut position = snapshot_test_position();
+    let position_id = position.id;
+    let fill = position.events[0].clone();
+
+    cache.snapshot_position(&position).unwrap();
+
+    // Grow the replay log as NETTING close/reopen cycles would
+    for _ in 0..1000 {
+        position
+            .replay_events
+            .push(PositionReplayEvent::Filled(fill.clone()));
+    }
+    cache.snapshot_position(&position).unwrap();
+
+    // Blob size is independent of the replay-log length
+    let frames = cache.position_snapshot_bytes(&position_id).unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].len(), frames[1].len());
+
+    let snapshots = cache.position_snapshots(Some(&position_id), None);
+    assert_eq!(snapshots.len(), 2);
+    for snapshot in &snapshots {
+        assert!(snapshot.replay_events.is_empty());
+        assert!(snapshot.fill_voids.is_empty());
+        assert_eq!(snapshot.realized_pnl, position.realized_pnl);
+        assert_eq!(snapshot.account_id, position.account_id);
+        assert_eq!(snapshot.quantity, position.quantity);
+    }
+}
+
 fn snapshot_test_position() -> Position {
     let audusd_sim = InstrumentAny::CurrencyPair(audusd_sim());
     let order = OrderTestBuilder::new(OrderType::Market)
@@ -5680,6 +6442,7 @@ fn snapshot_test_position() -> Position {
 #[derive(Default)]
 struct SnapshotBlobTestDatabase {
     general: AHashMap<String, Bytes>,
+    positions: AHashMap<PositionId, Position>,
     fail_add: bool,
 }
 
@@ -5689,6 +6452,21 @@ impl SnapshotBlobTestDatabase {
         general.insert(key, value);
         Self {
             general,
+            positions: AHashMap::new(),
+            fail_add: false,
+        }
+    }
+
+    fn with_position_oms(position: Position, oms_type: OmsType) -> Self {
+        let position_id = position.id;
+        let general = AHashMap::from([(
+            super::position_oms_key(position_id),
+            Bytes::from(serde_json::to_vec(&oms_type).unwrap()),
+        )]);
+        let positions = AHashMap::from([(position_id, position)]);
+        Self {
+            general,
+            positions,
             fail_add: false,
         }
     }
@@ -5696,6 +6474,7 @@ impl SnapshotBlobTestDatabase {
     fn fail_add() -> Self {
         Self {
             general: AHashMap::new(),
+            positions: AHashMap::new(),
             fail_add: true,
         }
     }
@@ -5740,7 +6519,7 @@ impl CacheDatabaseAdapter for SnapshotBlobTestDatabase {
     }
 
     async fn load_positions(&self) -> anyhow::Result<AHashMap<PositionId, Position>> {
-        Ok(AHashMap::new())
+        Ok(self.positions.clone())
     }
 
     fn load_index_order_position(&self) -> anyhow::Result<AHashMap<ClientOrderId, PositionId>> {
@@ -5985,7 +6764,7 @@ impl CacheDatabaseAdapter for SnapshotBlobTestDatabase {
 #[rstest]
 fn test_restore_position_snapshot_blob(mut cache: Cache) {
     let position = snapshot_test_position();
-    let snapshot_ref = cache.snapshot_position(&position).unwrap();
+    let snapshot_ref = cache.snapshot_position_encoded(&position).unwrap();
     let mut restored = Cache::default();
 
     restored
@@ -6005,6 +6784,38 @@ fn test_restore_position_snapshot_blob(mut cache: Cache) {
             .unwrap()
             .unwrap(),
         snapshot_ref.blob,
+    );
+    assert_eq!(
+        restored.position_snapshots(Some(&position.id), None),
+        cache.position_snapshots(Some(&position.id), None),
+    );
+}
+
+#[rstest]
+fn test_restore_position_snapshot_blob_keeps_the_restored_bytes_verbatim() {
+    let mut source_cache = Cache::default();
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let snapshot_ref = source_cache.snapshot_position_encoded(&position).unwrap();
+    let snapshot = source_cache
+        .position_snapshots(Some(&position_id), None)
+        .remove(0);
+    // Same value, different bytes: anchors hash the frame, so re-encoding it would break them
+    let pretty = Bytes::from(serde_json::to_vec_pretty(&snapshot).unwrap());
+    let mut cache = Cache::default();
+
+    cache
+        .restore_snapshot_blob(&snapshot_ref.blob_ref, pretty.clone())
+        .unwrap();
+
+    assert_ne!(pretty, snapshot_ref.blob);
+    assert_eq!(
+        cache.position_snapshot_bytes(&position_id).unwrap(),
+        vec![pretty.to_vec()],
+    );
+    assert_eq!(
+        cache.position_snapshots(Some(&position_id), None),
+        vec![snapshot],
     );
 }
 
@@ -6029,7 +6840,7 @@ fn test_restore_position_snapshot_blob_rejects_position_id_prefix_collision(mut 
     let mut source_cache = Cache::default();
     let mut position = snapshot_test_position();
     position.id = PositionId::new("P-1-EXTRA");
-    let snapshot_ref = source_cache.snapshot_position(&position).unwrap();
+    let snapshot_ref = source_cache.snapshot_position_encoded(&position).unwrap();
 
     let err = cache
         .restore_snapshot_blob("cache://position-snapshots/P-1/0", snapshot_ref.blob)
@@ -6059,7 +6870,7 @@ fn test_snapshot_position_failed_persist_does_not_advance_frame_count() {
 fn test_load_snapshot_blob_loads_from_database_when_not_in_memory() {
     let mut source_cache = Cache::default();
     let position = snapshot_test_position();
-    let snapshot_ref = source_cache.snapshot_position(&position).unwrap();
+    let snapshot_ref = source_cache.snapshot_position_encoded(&position).unwrap();
     let mut cache = Cache::new(
         None,
         Some(Box::new(SnapshotBlobTestDatabase::with_general(
@@ -6095,7 +6906,7 @@ fn test_restore_position_snapshot_blob_rejects_malformed_refs(
 ) {
     let mut source_cache = Cache::default();
     let position = snapshot_test_position();
-    let snapshot_ref = source_cache.snapshot_position(&position).unwrap();
+    let snapshot_ref = source_cache.snapshot_position_encoded(&position).unwrap();
     let mut cache = Cache::default();
 
     let err = cache
@@ -6109,7 +6920,7 @@ fn test_restore_position_snapshot_blob_rejects_malformed_refs(
 fn test_restore_position_snapshot_blob_rejects_skipped_frame() {
     let mut source_cache = Cache::default();
     let position = snapshot_test_position();
-    let snapshot_ref = source_cache.snapshot_position(&position).unwrap();
+    let snapshot_ref = source_cache.snapshot_position_encoded(&position).unwrap();
     let mut cache = Cache::default();
 
     let err = cache
@@ -6126,8 +6937,8 @@ fn test_restore_position_snapshot_blob_rejects_skipped_frame() {
 fn test_restore_position_snapshot_blob_rejects_conflicting_frame_bytes() {
     let mut source_cache = Cache::default();
     let position = snapshot_test_position();
-    let first_ref = source_cache.snapshot_position(&position).unwrap();
-    let second_ref = source_cache.snapshot_position(&position).unwrap();
+    let first_ref = source_cache.snapshot_position_encoded(&position).unwrap();
+    let second_ref = source_cache.snapshot_position_encoded(&position).unwrap();
     let mut cache = Cache::default();
 
     cache
@@ -6213,27 +7024,187 @@ fn test_position_snapshots_from_preserves_order_and_skip(mut cache: Cache) {
 }
 
 #[rstest]
-fn test_position_snapshots_skip_malformed_frames(mut cache: Cache) {
+fn test_position_snapshot_encodes_on_demand(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+
+    // With no database configured nothing forces the encode at snapshot time
+    cache.snapshot_position(&position).unwrap();
+    let blob_ref = position_snapshot_blob_ref(&position_id, 0);
+
+    let unencoded = cache.get(&blob_ref).unwrap().cloned();
+    let first = cache.position_snapshot_bytes(&position_id).unwrap();
+    let second = cache.position_snapshot_bytes(&position_id).unwrap();
+    let loaded = cache.load_snapshot_blob(&blob_ref).unwrap().unwrap();
+    let snapshots = cache.position_snapshots(Some(&position_id), None);
+    let from_zero = cache.position_snapshots_from(&position_id, 0);
+
+    // No generic entry until a consumer asks, and repeat reads encode once
+    assert_eq!(unencoded, None);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first, second);
+    assert_eq!(loaded.as_ref(), first[0].as_slice());
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(from_zero, snapshots);
+    assert_eq!(
+        serde_json::from_slice::<Position>(&first[0]).unwrap(),
+        snapshots[0],
+    );
+}
+
+#[rstest]
+fn test_position_snapshot_persists_eagerly_with_database() {
+    let mut cache = Cache::new(None, Some(Box::new(SnapshotBlobTestDatabase::default())));
     let position = snapshot_test_position();
     let position_id = position.id;
 
     cache.snapshot_position(&position).unwrap();
-    // Inject a corrupt frame between two valid ones
-    cache
-        .position_snapshots
-        .get_mut(&position_id)
-        .unwrap()
-        .push(Bytes::from_static(b"not json"));
-    cache.snapshot_position(&position).unwrap();
+    let blob_ref = position_snapshot_blob_ref(&position_id, 0);
 
-    // Raw frame count stays authoritative; decoded view drops the bad frame
-    assert_eq!(cache.position_snapshot_count(&position_id), 3);
+    let persisted = cache.get(&blob_ref).unwrap().cloned().unwrap();
+    let frames = cache.position_snapshot_bytes(&position_id).unwrap();
+
+    // A backing database has to receive the frame now, so the encode cannot be deferred
+    assert_eq!(persisted.as_ref(), frames[0].as_slice());
     assert_eq!(
-        cache.position_snapshot_bytes(&position_id).unwrap().len(),
-        3
+        serde_json::from_slice::<Position>(&persisted).unwrap(),
+        cache.position_snapshots(Some(&position_id), None)[0],
     );
-    assert_eq!(cache.position_snapshots(Some(&position_id), None).len(), 2);
-    assert_eq!(cache.position_snapshots_from(&position_id, 0).len(), 2);
+}
+
+#[rstest]
+fn test_snapshot_position_encoded_returns_the_stored_frame_bytes(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+
+    let snapshot_ref = cache.snapshot_position_encoded(&position).unwrap();
+    let frames = cache.position_snapshot_bytes(&position_id).unwrap();
+
+    assert_eq!(
+        snapshot_ref.blob_ref,
+        position_snapshot_blob_ref(&position_id, 0),
+    );
+    assert_eq!(frames.len(), 1);
+    assert_eq!(snapshot_ref.blob.as_ref(), frames[0].as_slice());
+    assert_eq!(
+        cache.get(&snapshot_ref.blob_ref).unwrap().cloned(),
+        Some(snapshot_ref.blob),
+    );
+}
+
+#[rstest]
+fn test_restore_snapshot_blob_is_idempotent_for_own_frame_bytes(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+
+    cache.snapshot_position(&position).unwrap();
+    let blob_ref = position_snapshot_blob_ref(&position_id, 0);
+    let blob = cache.load_snapshot_blob(&blob_ref).unwrap().unwrap();
+
+    cache
+        .restore_snapshot_blob(&blob_ref, blob.clone())
+        .unwrap();
+
+    assert_eq!(cache.position_snapshot_count(&position_id), 1);
+    assert_eq!(
+        cache.position_snapshot_bytes(&position_id).unwrap(),
+        vec![blob.to_vec()],
+    );
+}
+
+#[rstest]
+fn test_restore_snapshot_blob_rejects_conflicting_bytes_for_unencoded_frame(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let mut source_cache = Cache::default();
+    let other_ref = source_cache.snapshot_position_encoded(&position).unwrap();
+
+    // Frame stored without encoding, so the conflicting-bytes check has to encode it before
+    // it can reject the other cache's frame, whose snapshot ID carries a different UUID.
+    cache.snapshot_position(&position).unwrap();
+    let blob_ref = position_snapshot_blob_ref(&position_id, 0);
+
+    let err = cache
+        .restore_snapshot_blob(&blob_ref, other_ref.blob.clone())
+        .expect_err("conflicting frame");
+    let stored = cache.load_snapshot_blob(&blob_ref).unwrap().unwrap();
+
+    assert_ne!(other_ref.blob, stored);
+    assert!(
+        err.to_string()
+            .contains("already exists with different bytes"),
+        "err was: {err}",
+    );
+    assert_eq!(
+        cache.position_snapshot_bytes(&position_id).unwrap(),
+        vec![stored.to_vec()],
+    );
+}
+
+#[rstest]
+fn test_settle_position_snapshots_replaces_frames_and_keeps_durable_blobs(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let mut other_position = snapshot_test_position();
+    other_position.id = PositionId::new("P-2");
+    let first_ref = cache.snapshot_position_encoded(&position).unwrap();
+    let second_ref = cache.snapshot_position_encoded(&position).unwrap();
+    cache.snapshot_position_encoded(&other_position).unwrap();
+
+    cache.settle_position_snapshots(&position, Some(Money::from("7.00 USD")));
+
+    let settled = cache.position_snapshots(Some(&position_id), None);
+
+    // The two stale frames become one worth the settled total
+    assert_eq!(cache.position_snapshot_count(&position_id), 1);
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].realized_pnl, Some(Money::from("7.00 USD")));
+    assert_eq!(cache.position_snapshot_count(&other_position.id), 1);
+    // Durable blobs are untouched, matching `purge_position`, so an anchor still resolves
+    assert_eq!(
+        cache.load_snapshot_blob(&first_ref.blob_ref).unwrap(),
+        Some(first_ref.blob),
+    );
+    assert_eq!(
+        cache.load_snapshot_blob(&second_ref.blob_ref).unwrap(),
+        Some(second_ref.blob),
+    );
+}
+
+#[rstest]
+fn test_restore_snapshot_blob_after_settling_to_nothing_requires_the_first_frame(mut cache: Cache) {
+    let position = snapshot_test_position();
+    let position_id = position.id;
+    let first_ref = cache.snapshot_position_encoded(&position).unwrap();
+    let second_ref = cache.snapshot_position_encoded(&position).unwrap();
+
+    cache.settle_position_snapshots(&position, None);
+
+    // Settling to nothing empties the frame vector, so the contiguous-index rule rejects a
+    // later frame instead of leaving a hole, and accepts frame 0.
+    let err = cache
+        .restore_snapshot_blob(&second_ref.blob_ref, second_ref.blob.clone())
+        .expect_err("skipped frame");
+    cache
+        .restore_snapshot_blob(&first_ref.blob_ref, first_ref.blob.clone())
+        .unwrap();
+
+    assert!(
+        err.to_string().contains("skips missing frame 0"),
+        "err was: {err}",
+    );
+    assert_eq!(cache.position_snapshot_count(&position_id), 1);
+    assert_eq!(
+        cache.position_snapshot_bytes(&position_id).unwrap(),
+        vec![first_ref.blob.to_vec()],
+    );
+}
+
+fn position_snapshot_blob_ref(position_id: &PositionId, index: usize) -> String {
+    format!(
+        "cache://position-snapshots/{}/{index}",
+        position_id.as_str()
+    )
 }
 
 #[rstest]

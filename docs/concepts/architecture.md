@@ -51,10 +51,10 @@ business requirements. Practically this means we:
 - Prefer zero-cost safety techniques built into Rust (ownership, `Result`
   surfaces, `panic = abort`) and add targeted formal tools only where they pay
   for themselves.
-- Track “assurance debt” alongside feature work so new integrations extend the
+- Track "assurance debt" alongside feature work so new integrations extend the
   safety net rather than bypass it.
 
-This approach preserves the platform’s delivery cadence while giving
+This approach preserves the platform's delivery cadence while giving
 high-stakes flows the additional scrutiny they need.
 
 Further reading: [High Assurance Rust](https://highassurance.rs/).
@@ -638,7 +638,7 @@ flowchart BT
 **Crate categories:**
 
 | Category       | Crates                                                    | Purpose                                                  |
-|----------------|-----------------------------------------------------------|----------------------------------------------------------|
+| -------------- | --------------------------------------------------------- | -------------------------------------------------------- |
 | Foundation     | `core`, `model`, `common`, `system`, `trading`            | Primitives, domain model, kernel, actor & strategy base. |
 | Engines        | `data`, `execution`, `portfolio`, `risk`                  | Core trading engine components.                          |
 | Infrastructure | `serialization`, `network`, `cryptography`, `persistence` | Encoding, networking, signing, storage.                  |
@@ -648,12 +648,12 @@ flowchart BT
 
 **Feature flags:**
 
-| Feature     | Crates                     | Effect                                                     |
-|-------------|----------------------------|------------------------------------------------------------|
-| `streaming` | `data`, `system`, `live`   | Enables `persistence` dependency for catalog streaming.    |
-| `cloud`     | `persistence`              | Enables cloud storage backends (S3, Azure, GCP, HTTP).     |
-| `python`    | most crates                | Enables PyO3 bindings (auto‑enables `streaming`, `cloud`). |
-| `defi`      | `common`, `model`, `data`  | Enables DeFi/blockchain data types.                        |
+| Feature     | Crates                    | Effect                                                     |
+| ----------- | ------------------------- | ---------------------------------------------------------- |
+| `streaming` | `data`, `system`, `live`  | Enables `persistence` dependency for catalog streaming.    |
+| `cloud`     | `persistence`             | Enables cloud storage backends (S3, Azure, GCP, HTTP).     |
+| `python`    | most crates               | Enables PyO3 bindings (auto‑enables `streaming`, `cloud`). |
+| `defi`      | `common`, `model`, `data` | Enables DeFi/blockchain data types.                        |
 
 :::note
 Both Rust and Cython are build dependencies. The binary wheels produced from a build do not require

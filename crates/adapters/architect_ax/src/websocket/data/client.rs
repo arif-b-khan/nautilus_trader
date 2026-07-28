@@ -33,8 +33,8 @@ use nautilus_network::{
     http::USER_AGENT,
     mode::ConnectionMode,
     websocket::{
-        PingHandler, SubscriptionState, TransportBackend, WebSocketClient, WebSocketConfig,
-        channel_message_handler,
+        PingHandler, ReconnectHeaders, SubscriptionState, TransportBackend, WebSocketClient,
+        WebSocketConfig, channel_message_handler,
     },
 };
 use ustr::Ustr;
@@ -129,7 +129,8 @@ impl SymbolDataTypes {
 pub struct AxMdWebSocketClient {
     url: String,
     heartbeat: Option<u64>,
-    auth_token: Option<String>,
+    auth_token: Arc<Mutex<Option<String>>>,
+    reconnect_headers: Arc<Mutex<Option<ReconnectHeaders>>>,
     connection_mode: Arc<ArcSwap<AtomicU8>>,
     cmd_tx: Arc<tokio::sync::RwLock<tokio::sync::mpsc::UnboundedSender<HandlerCommand>>>,
     out_rx: Option<Arc<tokio::sync::mpsc::UnboundedReceiver<AxDataWsMessage>>>,
@@ -159,7 +160,8 @@ impl Clone for AxMdWebSocketClient {
         Self {
             url: self.url.clone(),
             heartbeat: self.heartbeat,
-            auth_token: self.auth_token.clone(),
+            auth_token: Arc::clone(&self.auth_token),
+            reconnect_headers: Arc::clone(&self.reconnect_headers),
             connection_mode: Arc::clone(&self.connection_mode),
             cmd_tx: Arc::clone(&self.cmd_tx),
             out_rx: None,
@@ -196,7 +198,8 @@ impl AxMdWebSocketClient {
         Self {
             url,
             heartbeat: Some(heartbeat),
-            auth_token: Some(auth_token),
+            auth_token: Arc::new(Mutex::new(Some(auth_token))),
+            reconnect_headers: Arc::new(Mutex::new(None)),
             connection_mode,
             cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
@@ -230,7 +233,8 @@ impl AxMdWebSocketClient {
         Self {
             url,
             heartbeat: Some(heartbeat),
-            auth_token: None,
+            auth_token: Arc::new(Mutex::new(None)),
+            reconnect_headers: Arc::new(Mutex::new(None)),
             connection_mode,
             cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
@@ -255,8 +259,35 @@ impl AxMdWebSocketClient {
     /// Sets the authentication token for subsequent connections.
     ///
     /// This should be called before `connect()` if authentication is required.
-    pub fn set_auth_token(&mut self, token: String) {
-        self.auth_token = Some(token);
+    pub fn set_auth_token(&self, token: String) {
+        *self
+            .auth_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+    }
+
+    /// Updates the token used by future automatic reconnect attempts.
+    ///
+    /// Updating the token does not interrupt the active WebSocket connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reconnect header cannot be updated.
+    pub fn update_auth_token(&self, token: String) -> AxWsResult<()> {
+        let value = format!("Bearer {token}");
+
+        if let Some(headers) = self
+            .reconnect_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            headers
+                .update("Authorization", &value)
+                .map_err(|e| AxWsClientError::Transport(e.to_string()))?;
+        }
+        self.set_auth_token(token);
+        Ok(())
     }
 
     /// Returns whether the client is currently connected and active.
@@ -323,7 +354,13 @@ impl AxMdWebSocketClient {
 
         let mut headers = vec![(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())];
 
-        if let Some(ref token) = self.auth_token {
+        let auth_token = self
+            .auth_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        if let Some(token) = auth_token {
             headers.push(("Authorization".to_string(), format!("Bearer {token}")));
         }
 
@@ -415,6 +452,10 @@ impl AxMdWebSocketClient {
         };
 
         self.connection_mode.store(client.connection_mode_atomic());
+        *self
+            .reconnect_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client.reconnect_headers());
 
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<AxDataWsMessage>();
         self.out_rx = Some(Arc::new(out_rx));
@@ -472,9 +513,8 @@ impl AxMdWebSocketClient {
             .cloned()
             .unwrap_or_default();
 
-        // AX allows only one subscription per symbol, skip if book already subscribed
-        if current.book_level.is_some() {
-            log::debug!("Book deltas already subscribed for {symbol}, skipping");
+        if current.book_level == Some(level) {
+            log::debug!("Book deltas already subscribed for {symbol} at {level:?}, skipping");
             return Ok(());
         }
 
@@ -863,23 +903,24 @@ impl AxMdWebSocketClient {
 
     async fn send_unsubscribe(&self, symbol: &str, spec: AxMdSubscriptionSpec) -> AxWsResult<()> {
         let request_id = self.next_request_id();
+        let topic = spec.topic(symbol);
+        let was_pending = self
+            .subscriptions
+            .pending_subscribe_topics()
+            .contains(&topic);
 
-        self.send_cmd(HandlerCommand::Unsubscribe {
-            request_id,
-            symbol: Ustr::from(symbol),
-        })
-        .await?;
+        self.subscriptions.mark_unsubscribe(&topic);
 
-        self.subscriptions.mark_unsubscribe(&spec.topic(symbol));
-
-        for level in [
-            AxMarketDataLevel::Level1,
-            AxMarketDataLevel::Level2,
-            AxMarketDataLevel::Level3,
-            AxMarketDataLevel::Trades,
-        ] {
-            let topic = format!("{symbol}:{level:?}");
-            self.subscriptions.mark_unsubscribe(&topic);
+        if let Err(e) = self
+            .send_cmd(HandlerCommand::Unsubscribe {
+                request_id,
+                symbol: Ustr::from(symbol),
+                topic: topic.clone(),
+            })
+            .await
+        {
+            self.restore_unsubscribe_state(&topic, was_pending);
+            return Err(e);
         }
 
         Ok(())
@@ -932,15 +973,41 @@ impl AxMdWebSocketClient {
         let _guard = self.subscribe_lock.lock().await;
         let request_id = self.next_request_id();
         let topic = format!("candles:{symbol}:{width:?}");
+        let was_pending = self
+            .subscriptions
+            .pending_subscribe_topics()
+            .contains(&topic);
+
+        if !self.is_subscribed_topic(&topic) {
+            log::debug!("Not subscribed to {topic}, skipping unsubscribe");
+            return Ok(());
+        }
 
         self.subscriptions.mark_unsubscribe(&topic);
 
-        self.send_cmd(HandlerCommand::UnsubscribeCandles {
-            request_id,
-            symbol: Ustr::from(symbol),
-            width,
-        })
-        .await
+        if let Err(e) = self
+            .send_cmd(HandlerCommand::UnsubscribeCandles {
+                request_id,
+                symbol: Ustr::from(symbol),
+                width,
+                topic: topic.clone(),
+            })
+            .await
+        {
+            self.restore_unsubscribe_state(&topic, was_pending);
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    fn restore_unsubscribe_state(&self, topic: &str, was_pending: bool) {
+        self.subscriptions.confirm_unsubscribe(topic);
+        if was_pending {
+            self.subscriptions.mark_subscribe(topic);
+        } else {
+            self.subscriptions.confirm_subscribe(topic);
+        }
     }
 
     /// Returns a stream of WebSocket messages.
@@ -991,6 +1058,11 @@ impl AxMdWebSocketClient {
                 }
             }
         }
+
+        *self
+            .reconnect_headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     async fn send_cmd(&self, cmd: HandlerCommand) -> AxWsResult<()> {
@@ -1086,5 +1158,93 @@ mod tests {
             ))
         );
         assert!(!sdt.is_empty());
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn test_unsubscribe_send_failure_restores_subscription(#[case] was_pending: bool) {
+        let client = AxMdWebSocketClient::new(
+            "ws://localhost:9999/md/ws".to_string(),
+            "test_token".to_string(),
+            30,
+            TransportBackend::default(),
+            None,
+        );
+        let symbol = "EURUSD-PERP";
+        let spec = AxMdSubscriptionSpec::new(AxMarketDataLevel::Level2, Some(false), Some(false));
+        let topic = spec.topic(symbol);
+        client.subscriptions.mark_subscribe(&topic);
+        if !was_pending {
+            client.subscriptions.confirm_subscribe(&topic);
+        }
+
+        let error = client.send_unsubscribe(symbol, spec).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "Channel error: channel closed");
+        assert_eq!(client.subscription_count(), usize::from(!was_pending));
+        assert_eq!(client.subscriptions.all_topics(), vec![topic]);
+        assert_eq!(
+            client.subscriptions.pending_subscribe_topics().len(),
+            usize::from(was_pending)
+        );
+        assert!(client.subscriptions.pending_unsubscribe_topics().is_empty());
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn test_unsubscribe_candles_send_failure_restores_subscription(
+        #[case] was_pending: bool,
+    ) {
+        let client = AxMdWebSocketClient::new(
+            "ws://localhost:9999/md/ws".to_string(),
+            "test_token".to_string(),
+            30,
+            TransportBackend::default(),
+            None,
+        );
+        let symbol = "EURUSD-PERP";
+        let width = AxCandleWidth::Minutes1;
+        let topic = format!("candles:{symbol}:{width:?}");
+        client.subscriptions.mark_subscribe(&topic);
+        if !was_pending {
+            client.subscriptions.confirm_subscribe(&topic);
+        }
+
+        let error = client.unsubscribe_candles(symbol, width).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "Channel error: channel closed");
+        assert_eq!(client.subscription_count(), usize::from(!was_pending));
+        assert_eq!(client.subscriptions.all_topics(), vec![topic]);
+        assert_eq!(
+            client.subscriptions.pending_subscribe_topics().len(),
+            usize::from(was_pending)
+        );
+        assert!(client.subscriptions.pending_unsubscribe_topics().is_empty());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_unsubscribe_candles_skips_untracked_topic() {
+        let client = AxMdWebSocketClient::new(
+            "ws://localhost:9999/md/ws".to_string(),
+            "test_token".to_string(),
+            30,
+            TransportBackend::default(),
+            None,
+        );
+
+        client
+            .unsubscribe_candles("EURUSD-PERP", AxCandleWidth::Minutes1)
+            .await
+            .unwrap();
+
+        assert_eq!(client.subscription_count(), 0);
+        assert!(client.subscriptions.all_topics().is_empty());
+        assert!(client.subscriptions.pending_subscribe_topics().is_empty());
+        assert!(client.subscriptions.pending_unsubscribe_topics().is_empty());
     }
 }

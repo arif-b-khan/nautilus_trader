@@ -19,6 +19,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+use indexmap::IndexMap;
 use nautilus_backtest::{
     config::{BacktestEngineConfig, SimulatedVenueConfig},
     engine::BacktestEngine,
@@ -66,7 +67,8 @@ use nautilus_model::{
 use nautilus_system::trader::Trader;
 use nautilus_trading::{
     ExecutionAlgorithm, ExecutionAlgorithmConfig, ExecutionAlgorithmCore, Strategy, StrategyConfig,
-    StrategyCore, nautilus_execution_algorithm, nautilus_strategy,
+    StrategyCore, TwapAlgorithm, TwapAlgorithmConfig, nautilus_execution_algorithm,
+    nautilus_strategy,
 };
 use rstest::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -97,6 +99,37 @@ impl Debug for EmptyStrategy {
 }
 
 impl DataActor for EmptyStrategy {}
+
+struct FailingStartStrategy {
+    core: StrategyCore,
+}
+
+impl FailingStartStrategy {
+    fn new() -> Self {
+        let config = StrategyConfig {
+            strategy_id: Some(StrategyId::from("FAILING-START-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        };
+        Self {
+            core: StrategyCore::new(config),
+        }
+    }
+}
+
+nautilus_strategy!(FailingStartStrategy);
+
+impl Debug for FailingStartStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(FailingStartStrategy)).finish()
+    }
+}
+
+impl DataActor for FailingStartStrategy {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("simulated backtest strategy start failure")
+    }
+}
 
 struct EmptyActor {
     core: DataActorCore,
@@ -239,6 +272,68 @@ impl DataActor for EmaCross {
         }
 
         self.prev_fast_above = Some(fast_above);
+        Ok(())
+    }
+}
+
+struct TwapOrderStrategy {
+    core: StrategyCore,
+    instrument_id: InstrumentId,
+    exec_algorithm_id: ExecAlgorithmId,
+    submitted: bool,
+}
+
+impl TwapOrderStrategy {
+    fn new(instrument_id: InstrumentId, exec_algorithm_id: ExecAlgorithmId) -> Self {
+        let config = StrategyConfig {
+            strategy_id: Some(StrategyId::from("TWAP-ORDER-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        };
+        Self {
+            core: StrategyCore::new(config),
+            instrument_id,
+            exec_algorithm_id,
+            submitted: false,
+        }
+    }
+}
+
+nautilus_strategy!(TwapOrderStrategy);
+
+impl Debug for TwapOrderStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(TwapOrderStrategy)).finish()
+    }
+}
+
+impl DataActor for TwapOrderStrategy {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        self.subscribe_quotes(self.instrument_id, None, None);
+        Ok(())
+    }
+
+    fn on_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        if !self.submitted {
+            self.submitted = true;
+            let mut params = IndexMap::new();
+            params.insert(Ustr::from("horizon_secs"), Ustr::from("4.0"));
+            params.insert(Ustr::from("interval_secs"), Ustr::from("1.0"));
+
+            let order = self.order().market(
+                self.instrument_id,
+                OrderSide::Buy,
+                Quantity::from("0.100"),
+                None,
+                None,
+                None,
+                Some(self.exec_algorithm_id),
+                Some(params),
+                None,
+                None,
+            );
+            self.submit_order(order, None, None, None)?;
+        }
         Ok(())
     }
 }
@@ -1784,6 +1879,38 @@ fn test_run_with_strategy(crypto_perpetual_ethusdt: CryptoPerpetual) {
 }
 
 #[rstest]
+fn test_run_propagates_strategy_start_failure(crypto_perpetual_ethusdt: CryptoPerpetual) {
+    let mut engine = create_engine();
+    let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
+    let instrument_id = instrument.id();
+    engine.add_instrument(&instrument).unwrap();
+    engine.add_strategy(FailingStartStrategy::new()).unwrap();
+    engine
+        .add_data(
+            vec![quote(instrument_id, "1000.00", "1000.10", 1_000_000_000)],
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+
+    let err = engine
+        .run(None, None, None, false)
+        .expect_err("strategy start should fail");
+    let trader_stopped = engine.kernel().trader.borrow().is_stopped();
+    engine.dispose();
+
+    assert!(
+        err.to_string()
+            .contains("simulated backtest strategy start failure"),
+        "unexpected error: {err:#}"
+    );
+    assert!(trader_stopped);
+    assert!(engine.kernel().trader.borrow().is_disposed());
+    assert_eq!(engine.kernel().trader.borrow().component_count(), 0);
+}
+
+#[rstest]
 fn test_run_with_start_end_bounds(crypto_perpetual_ethusdt: CryptoPerpetual) {
     let mut engine = create_engine();
     let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
@@ -1830,7 +1957,7 @@ fn test_reset_preserves_data(crypto_perpetual_ethusdt: CryptoPerpetual) {
     let result1 = engine.get_result();
     assert_eq!(result1.iterations, 2);
 
-    // Reset and run again — data should persist
+    // Reset and run again - data should persist
     engine.reset();
 
     engine.add_strategy(EmptyStrategy::new()).unwrap();
@@ -1872,10 +1999,10 @@ fn test_ema_cross_strategy_generates_orders(crypto_perpetual_ethusdt: CryptoPerp
         .unwrap();
 
     // Generate price series with clear trend changes to trigger EMA crossovers.
-    // Phase 1: Flat at 1000 (25 ticks) — both EMAs initialize and converge
-    // Phase 2: Ramp up to 1200 (40 ticks) — fast EMA crosses above slow → BUY
-    // Phase 3: Ramp down to 800 (80 ticks) — fast EMA crosses below slow → SELL
-    // Phase 4: Ramp up to 1000 (40 ticks) — fast crosses above again → BUY
+    // Phase 1: Flat at 1000 (25 ticks) - both EMAs initialize and converge
+    // Phase 2: Ramp up to 1200 (40 ticks) - fast EMA crosses above slow → BUY
+    // Phase 3: Ramp down to 800 (80 ticks) - fast EMA crosses below slow → SELL
+    // Phase 4: Ramp up to 1000 (40 ticks) - fast crosses above again → BUY
     let spread = 0.10;
     let mut quotes = Vec::new();
     let base_ts: u64 = 1_000_000_000;
@@ -1924,6 +2051,127 @@ fn test_ema_cross_strategy_generates_orders(crypto_perpetual_ethusdt: CryptoPerp
     assert!(
         bt_result.total_positions > 0,
         "Expected positions from filled orders"
+    );
+}
+
+#[rstest]
+fn test_twap_exec_algorithm_routes_and_slices_order(crypto_perpetual_ethusdt: CryptoPerpetual) {
+    let mut engine = create_engine();
+    let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
+    let instrument_id = instrument.id();
+    let exec_algorithm_id = ExecAlgorithmId::from("TWAP-001");
+    engine.add_instrument(&instrument).unwrap();
+    engine
+        .add_exec_algorithm(TwapAlgorithm::new(TwapAlgorithmConfig {
+            exec_algorithm_id: Some(exec_algorithm_id),
+            ..Default::default()
+        }))
+        .unwrap();
+    engine
+        .add_strategy(TwapOrderStrategy::new(instrument_id, exec_algorithm_id))
+        .unwrap();
+
+    let quotes = vec![
+        quote(instrument_id, "1000.00", "1000.00", 1_000_000_000),
+        quote(instrument_id, "1000.00", "1000.00", 2_000_000_000),
+        quote(instrument_id, "1000.00", "1000.00", 3_000_000_000),
+        quote(instrument_id, "1000.00", "1000.00", 4_000_000_000),
+        quote(instrument_id, "1000.00", "1000.00", 5_000_000_000),
+    ];
+    engine.add_data(quotes, None, true, true).unwrap();
+    engine.run(None, None, None, false).unwrap();
+
+    let result = engine.get_result();
+    assert_eq!(result.iterations, 5);
+    assert_eq!(result.total_orders, 4);
+    assert_eq!(result.total_positions, 1);
+    assert_eq!(result.elapsed_time_secs, 4.0);
+    assert_eq!(result.backtest_start, Some(UnixNanos::from(1_000_000_000)));
+    assert_eq!(result.backtest_end, Some(UnixNanos::from(5_000_000_000)));
+
+    let cache = engine.kernel().cache.borrow();
+    let orders = cache.orders(None, Some(&instrument_id), None, None, None);
+    let primary_orders: Vec<_> = orders
+        .iter()
+        .filter(|order| order.exec_spawn_id() == Some(order.client_order_id()))
+        .collect();
+    let spawned_orders: Vec<_> = orders
+        .iter()
+        .filter(|order| order.exec_spawn_id() != Some(order.client_order_id()))
+        .collect();
+
+    assert_eq!(primary_orders.len(), 1);
+    assert_eq!(spawned_orders.len(), 3);
+    assert!(
+        orders
+            .iter()
+            .all(|order| order.quantity() == Quantity::from("0.025"))
+    );
+    assert!(
+        orders
+            .iter()
+            .all(|order| order.status() == OrderStatus::Filled)
+    );
+    assert!(
+        orders
+            .iter()
+            .all(|order| order.exec_algorithm_id() == Some(exec_algorithm_id))
+    );
+    assert_eq!(
+        orders
+            .iter()
+            .flat_map(|order| order.events())
+            .filter(|event| matches!(event, OrderEventAny::Filled(_)))
+            .count(),
+        4
+    );
+
+    let primary = primary_orders[0];
+    assert_eq!(primary.exec_spawn_id(), Some(primary.client_order_id()));
+    assert!(
+        spawned_orders
+            .iter()
+            .all(|order| order.exec_spawn_id() == Some(primary.client_order_id()))
+    );
+    assert_eq!(
+        primary.quantity().as_decimal()
+            + spawned_orders
+                .iter()
+                .map(|order| order.quantity().as_decimal())
+                .sum::<Decimal>(),
+        Decimal::new(1, 1)
+    );
+
+    let mut fill_times: Vec<_> = orders.iter().map(|order| order.ts_last()).collect();
+    fill_times.sort_unstable();
+    assert_eq!(
+        fill_times,
+        vec![
+            UnixNanos::from(1_000_000_000),
+            UnixNanos::from(2_000_000_000),
+            UnixNanos::from(3_000_000_000),
+            UnixNanos::from(4_000_000_000),
+        ]
+    );
+    assert!(
+        cache
+            .orders_open(None, Some(&instrument_id), None, None, None)
+            .is_empty()
+    );
+    let positions = cache.positions_open(None, Some(&instrument_id), None, None, None);
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].quantity, Quantity::from("0.100"));
+    assert_eq!(positions[0].event_count(), 4);
+    assert_eq!(
+        positions[0]
+            .unrealized_pnl(Price::from("1000.00"))
+            .as_decimal(),
+        Decimal::ZERO
+    );
+    assert!(
+        cache
+            .positions_closed(None, Some(&instrument_id), None, None, None)
+            .is_empty()
     );
 }
 
@@ -2509,7 +2757,7 @@ fn test_strategy_receives_only_subscribed_quotes(crypto_perpetual_ethusdt: Crypt
         .add_strategy(EmaCross::new(instrument_id, Quantity::from("0.100"), 3, 5))
         .unwrap();
 
-    // 10 quotes ramping up then 10 down — with 3/5 periods, should trigger quickly
+    // 10 quotes ramping up then 10 down - with 3/5 periods, should trigger quickly
     let mut quotes = Vec::new();
     let base_ts: u64 = 1_000_000_000;
     let interval: u64 = 1_000_000_000;
@@ -3651,8 +3899,7 @@ fn test_list_venues_multiple() {
         )
         .unwrap();
 
-    let mut venues = engine.list_venues();
-    venues.sort_by_key(|v| v.to_string());
+    let venues = engine.list_venues();
     assert_eq!(venues.len(), 2);
     assert_eq!(venues[0], Venue::from("BINANCE"));
     assert_eq!(venues[1], Venue::from("BITMEX"));

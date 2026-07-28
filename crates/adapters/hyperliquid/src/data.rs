@@ -28,19 +28,19 @@ use chrono::{DateTime, Utc};
 use nautilus_common::{
     cache::InstrumentLookupError,
     clients::DataClient,
-    live::{runner::get_data_event_sender, runtime::get_runtime},
+    live::{runner::get_data_event_sender, runtime::get_runtime, task::TaskHandles},
     messages::{
         DataEvent,
         data::{
-            BarsResponse, BookResponse, DataResponse, FundingRatesResponse, InstrumentResponse,
-            InstrumentsResponse, RequestBars, RequestBookSnapshot, RequestFundingRates,
-            RequestInstrument, RequestInstruments, RequestTrades, SubscribeBars,
-            SubscribeBookDeltas, SubscribeBookDepth10, SubscribeCustomData, SubscribeFundingRates,
-            SubscribeIndexPrices, SubscribeInstrument, SubscribeMarkPrices, SubscribeQuotes,
-            SubscribeTrades, TradesResponse, UnsubscribeBars, UnsubscribeBookDeltas,
-            UnsubscribeBookDepth10, UnsubscribeCustomData, UnsubscribeFundingRates,
-            UnsubscribeIndexPrices, UnsubscribeInstrument, UnsubscribeInstruments,
-            UnsubscribeMarkPrices, UnsubscribeQuotes, UnsubscribeTrades,
+            BarsResponse, BookResponse, CustomDataResponse, DataResponse, FundingRatesResponse,
+            InstrumentResponse, InstrumentsResponse, RequestBars, RequestBookSnapshot,
+            RequestCustomData, RequestFundingRates, RequestInstrument, RequestInstruments,
+            RequestTrades, SubscribeBars, SubscribeBookDeltas, SubscribeBookDepth10,
+            SubscribeCustomData, SubscribeFundingRates, SubscribeIndexPrices, SubscribeInstrument,
+            SubscribeMarkPrices, SubscribeQuotes, SubscribeTrades, TradesResponse, UnsubscribeBars,
+            UnsubscribeBookDeltas, UnsubscribeBookDepth10, UnsubscribeCustomData,
+            UnsubscribeFundingRates, UnsubscribeIndexPrices, UnsubscribeInstrument,
+            UnsubscribeInstruments, UnsubscribeMarkPrices, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
 };
@@ -51,7 +51,8 @@ use nautilus_core::{
 };
 use nautilus_model::{
     data::{
-        Bar, BarType, BookOrder, Data, DataType, FundingRateUpdate, OrderBookDeltas_API, TradeTick,
+        Bar, BarType, BookOrder, CustomData, Data, DataType, FundingRateUpdate,
+        OrderBookDeltas_API, TradeTick,
     },
     enums::{BarAggregation, BookType, OrderSide},
     identifiers::{ClientId, InstrumentId, Venue},
@@ -89,9 +90,9 @@ pub struct HyperliquidDataClient {
     ws_client: HyperliquidWebSocketClient,
     is_connected: AtomicBool,
     cancellation_token: CancellationToken,
-    ws_stream_handle: Mutex<Option<JoinHandle<()>>>,
-    stream_health_handle: Mutex<Option<JoinHandle<()>>>,
-    pending_tasks: Mutex<Vec<JoinHandle<()>>>,
+    ws_stream_handle: Option<JoinHandle<()>>,
+    stream_health_handle: Option<JoinHandle<()>>,
+    pending_tasks: TaskHandles,
     data_sender: tokio::sync::mpsc::UnboundedSender<DataEvent>,
     instruments: Arc<AtomicMap<InstrumentId, InstrumentAny>>,
     coin_to_instrument_id: Arc<AtomicMap<Ustr, InstrumentId>>,
@@ -170,9 +171,9 @@ impl HyperliquidDataClient {
             ws_client,
             is_connected: AtomicBool::new(false),
             cancellation_token: CancellationToken::new(),
-            ws_stream_handle: Mutex::new(None),
-            stream_health_handle: Mutex::new(None),
-            pending_tasks: Mutex::new(Vec::new()),
+            ws_stream_handle: None,
+            stream_health_handle: None,
+            pending_tasks: TaskHandles::default(),
             data_sender,
             instruments: Arc::new(AtomicMap::new()),
             coin_to_instrument_id: Arc::new(AtomicMap::new()),
@@ -191,37 +192,21 @@ impl HyperliquidDataClient {
             }
         });
 
-        let mut tasks = self.pending_tasks.lock().expect(MUTEX_POISONED);
-        tasks.retain(|handle| !handle.is_finished());
-        tasks.push(handle);
+        self.pending_tasks.push(handle);
     }
 
     fn abort_pending_tasks(&self) {
-        let mut tasks = self.pending_tasks.lock().expect(MUTEX_POISONED);
-        for handle in tasks.drain(..) {
+        self.pending_tasks.abort_all();
+    }
+
+    fn abort_stream_health_monitor(&mut self) {
+        if let Some(handle) = self.stream_health_handle.take() {
             handle.abort();
         }
     }
 
-    fn abort_stream_health_monitor(&self) {
-        if let Some(handle) = self
-            .stream_health_handle
-            .lock()
-            .expect(MUTEX_POISONED)
-            .take()
-        {
-            handle.abort();
-        }
-    }
-
-    async fn stop_stream_health_monitor(&self) {
-        let handle = self
-            .stream_health_handle
-            .lock()
-            .expect(MUTEX_POISONED)
-            .take();
-
-        if let Some(handle) = handle {
+    async fn stop_stream_health_monitor(&mut self) {
+        if let Some(handle) = self.stream_health_handle.take() {
             match handle.await {
                 Ok(()) => {}
                 Err(e) if e.is_cancelled() => {}
@@ -258,13 +243,16 @@ impl HyperliquidDataClient {
             && self.config.stream_health_check_interval_secs > 0
     }
 
-    fn spawn_stream_health_monitor(&self) {
+    fn spawn_stream_health_monitor(&mut self) {
         if !self.stream_health_monitor_enabled() {
             return;
         }
 
-        let mut slot = self.stream_health_handle.lock().expect(MUTEX_POISONED);
-        if slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+        if self
+            .stream_health_handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
             return;
         }
 
@@ -297,7 +285,7 @@ impl HyperliquidDataClient {
             log::debug!("Hyperliquid stream health monitor stopped");
         });
 
-        *slot = Some(handle);
+        self.stream_health_handle = Some(handle);
     }
 
     fn venue(&self) -> Venue {
@@ -499,8 +487,7 @@ impl HyperliquidDataClient {
             log::debug!("Hyperliquid WebSocket consumption loop finished");
         });
 
-        let mut slot = self.ws_stream_handle.lock().expect(MUTEX_POISONED);
-        *slot = Some(task);
+        self.ws_stream_handle = Some(task);
         log::debug!("WebSocket consumption task spawned");
 
         Ok(())
@@ -539,14 +526,19 @@ impl DataClient for HyperliquidDataClient {
     fn reset(&mut self) -> anyhow::Result<()> {
         log::debug!("Resetting Hyperliquid data client {}", self.client_id);
         self.is_connected.store(false, Ordering::Relaxed);
-        self.cancellation_token = CancellationToken::new();
+        // Keep this generation cancelled until `connect()` has torn down the
+        // inner WebSocket client. Replacing it here would allow the next
+        // connection to reuse an active old-generation handler.
+        self.cancellation_token.cancel();
         self.abort_pending_tasks();
         self.abort_stream_health_monitor();
         self.clear_stream_health();
 
-        if let Some(handle) = self.ws_stream_handle.lock().expect(MUTEX_POISONED).take() {
+        if let Some(handle) = self.ws_stream_handle.take() {
             handle.abort();
         }
+        self.instruments.store(AHashMap::new());
+        self.coin_to_instrument_id.store(AHashMap::new());
         Ok(())
     }
 
@@ -569,6 +561,15 @@ impl DataClient for HyperliquidDataClient {
         }
 
         if self.cancellation_token.is_cancelled() {
+            // `reset()` is synchronous, while shutting down the inner socket
+            // is async. Complete that teardown before creating any new stream
+            // task so its receiver and subscription registries cannot belong
+            // to the previous generation.
+            if let Err(e) = self.ws_client.disconnect().await {
+                log::debug!("Error tearing down Hyperliquid WebSocket after reset: {e}");
+            }
+            self.ws_client.reset_runtime_state();
+            self.abort_pending_tasks();
             self.cancellation_token = CancellationToken::new();
         }
 
@@ -603,8 +604,7 @@ impl DataClient for HyperliquidDataClient {
 
         self.cancellation_token.cancel();
 
-        let ws_stream_handle = self.ws_stream_handle.lock().expect(MUTEX_POISONED).take();
-        if let Some(handle) = ws_stream_handle
+        if let Some(handle) = self.ws_stream_handle.take()
             && let Err(e) = handle.await
         {
             log::error!("Error waiting for WebSocket stream task: {e}");
@@ -673,6 +673,19 @@ impl DataClient for HyperliquidDataClient {
             return Ok(());
         }
 
+        if data_type == "HyperliquidPublicTrade" {
+            let ws = self.ws_client.clone();
+            let instrument_id = Self::custom_instrument_id(&cmd.data_type)?.context(
+                "HyperliquidPublicTrade subscriptions require metadata['instrument_id']",
+            )?;
+
+            self.spawn_task("subscribe_public_trades", async move {
+                ws.subscribe_public_trades(instrument_id).await
+            });
+
+            return Ok(());
+        }
+
         log::warn!("Unsupported custom data subscription: {data_type}");
         Ok(())
     }
@@ -719,6 +732,19 @@ impl DataClient for HyperliquidDataClient {
 
             self.spawn_task("unsubscribe_open_interest", async move {
                 ws.unsubscribe_open_interest(instrument_id).await
+            });
+
+            return Ok(());
+        }
+
+        if data_type == "HyperliquidPublicTrade" {
+            let ws = self.ws_client.clone();
+            let instrument_id = Self::custom_instrument_id(&cmd.data_type)?.context(
+                "HyperliquidPublicTrade unsubscriptions require metadata['instrument_id']",
+            )?;
+
+            self.spawn_task("unsubscribe_public_trades", async move {
+                ws.unsubscribe_public_trades(instrument_id).await
             });
 
             return Ok(());
@@ -1208,6 +1234,67 @@ impl DataClient for HyperliquidDataClient {
 
             if let Err(e) = sender.send(DataEvent::Response(response)) {
                 log::error!("Failed to send trades response: {e}");
+            }
+            Ok(())
+        });
+
+        Ok(())
+    }
+
+    fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
+        if request.data_type.type_name() != "HyperliquidPublicTrade" {
+            log::warn!(
+                "Unsupported custom data request: {}",
+                request.data_type.type_name()
+            );
+            return Ok(());
+        }
+
+        let instrument_id = Self::custom_instrument_id(&request.data_type)?
+            .context("HyperliquidPublicTrade requests require metadata['instrument_id']")?;
+        let data_type = DataType::new(
+            request.data_type.type_name(),
+            request.data_type.metadata().cloned(),
+            Some(instrument_id.to_string()),
+        );
+        let http = self.http_client.clone();
+        let sender = self.data_sender.clone();
+        let request_id = request.request_id;
+        let client_id = request.client_id;
+        let params = request.params;
+        let clock = self.clock;
+        let limit = request.limit.map(|limit| limit.get());
+        let start = request.start;
+        let end = request.end;
+        let start_nanos = datetime_to_unix_nanos(start);
+        let end_nanos = datetime_to_unix_nanos(end);
+        let venue = self.venue();
+
+        self.spawn_task("request_public_trades", async move {
+            let trades = http
+                .request_public_trades(instrument_id, start, end, limit)
+                .await
+                .map_err(anyhow::Error::new)
+                .with_context(|| format!("public trades request failed for {instrument_id}"))?;
+            let data: Vec<CustomData> = trades
+                .into_iter()
+                .map(|trade| CustomData::new(Arc::new(trade), data_type.clone()))
+                .collect();
+
+            let response = DataResponse::Data(CustomDataResponse::new(
+                request_id,
+                client_id,
+                Some(venue),
+                data_type,
+                data,
+                start_nanos,
+                end_nanos,
+                clock.get_time_ns(),
+                params,
+            ));
+
+            if let Err(e) = sender.send(DataEvent::Response(response)) {
+                log::error!("Failed to send public trades response: {e}");
             }
             Ok(())
         });

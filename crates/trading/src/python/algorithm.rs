@@ -20,30 +20,34 @@ use std::{cell::UnsafeCell, collections::HashMap, fmt::Debug, rc::Rc};
 use chrono::{DateTime, Utc};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, data_actor::DataActorCore},
+    component::Component,
     enums::ComponentState,
     python::{cache::PyCache, clock::PyClock, logging::PyLogger},
+    signal::Signal,
     timer::TimeEvent,
 };
 use nautilus_core::{
     UnixNanos,
-    python::{IntoPyObjectNautilusExt, to_pyruntime_err, to_pyvalue_err},
+    python::{to_pyruntime_err, to_pyvalue_err},
 };
 use nautilus_model::{
     data::{CustomData, DataType},
     enums::{TimeInForce, TriggerType},
     events::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderDenied, OrderEmulated,
-        OrderEventAny, OrderExpired, OrderFilled, OrderInitialized, OrderModifyRejected,
-        OrderPendingCancel, OrderPendingUpdate, OrderRejected, OrderReleased, OrderSubmitted,
-        OrderTriggered, OrderUpdated, PositionChanged, PositionClosed, PositionEvent,
-        PositionOpened,
+        OrderEventAny, OrderExpired, OrderFillVoided, OrderFilled, OrderInitialized,
+        OrderModifyRejected, OrderPendingCancel, OrderPendingUpdate, OrderRejected, OrderReleased,
+        OrderSubmitted, OrderTriggered, OrderUpdated, PositionChanged, PositionClosed,
+        PositionEvent, PositionOpened,
     },
     identifiers::{ActorId, ClientId, ExecAlgorithmId, PositionId, TraderId},
     orders::{LimitOrder, MarketOrder, MarketToLimitOrder, Order, OrderAny, OrderList},
     python::{events::order::order_event_to_pyobject, orders::pyobject_to_order_any},
     types::{Price, Quantity},
 };
+use nautilus_portfolio::python::PyPortfolio;
 use pyo3::{
+    IntoPyObjectExt,
     prelude::*,
     types::{PyDict, PyList},
 };
@@ -53,8 +57,6 @@ use crate::algorithm::{
     ExecutionAlgorithm, ExecutionAlgorithmConfig, ExecutionAlgorithmCore, ExecutionAlgorithmNative,
     ImportableExecAlgorithmConfig,
 };
-
-const DEFAULT_PY_EXEC_ALGORITHM_ID: &str = "PY-EXEC";
 
 /// Inner state of `PyExecutionAlgorithm`, shared between Python and Rust registries.
 pub struct PyExecutionAlgorithmInner {
@@ -122,7 +124,7 @@ impl PyExecutionAlgorithm {
     pub fn new(config: Option<ExecutionAlgorithmConfig>) -> Self {
         let mut config = config.unwrap_or_default();
         if config.exec_algorithm_id.is_none() {
-            config.exec_algorithm_id = Some(ExecAlgorithmId::new(DEFAULT_PY_EXEC_ALGORITHM_ID));
+            config.exec_algorithm_id = Some(ExecAlgorithmId::new(stringify!(ExecutionAlgorithm)));
         }
 
         let core = ExecutionAlgorithmCore::new(config);
@@ -192,7 +194,16 @@ impl PyExecutionAlgorithm {
     fn dispatch_time_event(&self, event: &TimeEvent) -> PyResult<()> {
         if let Some(ref py_self) = self.inner().py_self {
             Python::attach(|py| {
-                py_self.call_method1(py, "on_time_event", (event.clone().into_py_any_unwrap(py),))
+                py_self.call_method1(py, "on_time_event", (event.clone().into_py_any(py)?,))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_on_signal(&self, signal: &Signal) -> PyResult<()> {
+        if let Some(ref py_self) = self.inner().py_self {
+            Python::attach(|py| {
+                py_self.call_method1(py, "on_signal", (signal.clone().into_py_any(py)?,))
             })?;
         }
         Ok(())
@@ -211,7 +222,7 @@ impl PyExecutionAlgorithm {
     fn dispatch_on_order_list(&self, order_list: OrderList, orders: Vec<OrderAny>) -> PyResult<()> {
         if let Some(ref py_self) = self.inner().py_self {
             Python::attach(|py| -> PyResult<()> {
-                let py_order_list = order_list.into_py_any_unwrap(py);
+                let py_order_list = order_list.into_py_any(py)?;
                 let py_orders: Vec<_> = orders
                     .into_iter()
                     .map(|order| nautilus_model::python::orders::order_any_to_pyobject(py, order))
@@ -252,10 +263,10 @@ impl PyExecutionAlgorithm {
         if let Some(ref py_self) = self.inner().py_self {
             Python::attach(|py| {
                 let py_event = match event {
-                    PositionEvent::PositionOpened(event) => event.into_py_any_unwrap(py),
-                    PositionEvent::PositionChanged(event) => event.into_py_any_unwrap(py),
-                    PositionEvent::PositionClosed(event) => event.into_py_any_unwrap(py),
-                    PositionEvent::PositionAdjusted(event) => event.into_py_any_unwrap(py),
+                    PositionEvent::PositionOpened(event) => event.into_py_any(py)?,
+                    PositionEvent::PositionChanged(event) => event.into_py_any(py)?,
+                    PositionEvent::PositionClosed(event) => event.into_py_any(py)?,
+                    PositionEvent::PositionAdjusted(event) => event.into_py_any(py)?,
                 };
                 py_self.call_method1(py, method_name, (py_event,))
             })?;
@@ -459,6 +470,13 @@ impl ExecutionAlgorithm for PyExecutionAlgorithm {
         let _ = self.dispatch_order_event("on_order_filled", OrderEventAny::Filled(event));
     }
 
+    fn on_order_fill_voided(&mut self, event: &OrderFillVoided) {
+        let _ = self.dispatch_order_event(
+            "on_order_fill_voided",
+            OrderEventAny::FillVoided(event.clone()),
+        );
+    }
+
     fn on_order_event(&mut self, event: OrderEventAny) {
         let _ = self.dispatch_order_event("on_order_event", event);
     }
@@ -527,14 +545,22 @@ impl DataActor for PyExecutionAlgorithm {
         self.dispatch_time_event(event)
             .map_err(|e| anyhow::anyhow!("Python on_time_event failed: {e}"))
     }
+
+    fn on_signal(&mut self, signal: &Signal) -> anyhow::Result<()> {
+        self.dispatch_on_signal(signal)
+            .map_err(|e| anyhow::anyhow!("Python on_signal failed: {e}"))
+    }
 }
 
 #[pyo3::pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-#[expect(
+#[allow(
     clippy::large_types_passed_by_value,
+    reason = "PyO3 callbacks accept Python-owned event values"
+)]
+#[expect(
     clippy::unused_self,
-    reason = "default PyO3 callbacks must remain instance methods and accept Python-owned values"
+    reason = "default PyO3 callbacks must remain instance methods"
 )]
 impl PyExecutionAlgorithm {
     /// Creates a new [`PyExecutionAlgorithm`] instance.
@@ -551,13 +577,39 @@ impl PyExecutionAlgorithm {
 
     /// Captures the Python self reference for Rust→Python event dispatch.
     #[pyo3(signature = (config=None))]
-    fn __init__(slf: &Bound<'_, Self>, config: Option<Py<PyAny>>) {
+    fn __init__(slf: &Bound<'_, Self>, config: Option<Py<PyAny>>) -> PyResult<()> {
+        let retained_config = if config.is_none() {
+            Python::attach(|py| {
+                slf.borrow()
+                    .inner()
+                    .config
+                    .as_ref()
+                    .map(|config| config.clone_ref(py))
+            })
+        } else {
+            None
+        };
+        let has_configured_id = if let Some(config) = config.as_ref().or(retained_config.as_ref()) {
+            Python::attach(|py| slf.borrow_mut().configure_from_py_config(config.bind(py)))
+                .map_err(to_pyvalue_err)?
+        } else {
+            false
+        };
+
+        if !has_configured_id {
+            let py_type = slf.get_type();
+            let type_name = py_type.name()?;
+            let exec_algorithm_id =
+                ExecAlgorithmId::new_checked(type_name.to_str()?).map_err(to_pyvalue_err)?;
+            slf.borrow_mut().set_exec_algorithm_id(exec_algorithm_id);
+        }
         let py_self: Py<PyAny> = slf.clone().unbind().into_any();
         let mut borrowed = slf.borrow_mut();
         borrowed.set_python_instance(py_self);
         if config.is_some() {
             borrowed.set_config(config);
         }
+        Ok(())
     }
 
     #[getter]
@@ -602,6 +654,18 @@ impl PyExecutionAlgorithm {
     }
 
     #[getter]
+    #[pyo3(name = "portfolio")]
+    fn py_portfolio(&self) -> PyResult<PyPortfolio> {
+        if self.inner().core.actor.is_registered() {
+            Ok(PyPortfolio::from_rc(self.portfolio_rc()))
+        } else {
+            Err(to_pyruntime_err(
+                "ExecutionAlgorithm must be registered with a trader before accessing portfolio",
+            ))
+        }
+    }
+
+    #[getter]
     #[pyo3(name = "log")]
     fn py_log(&self) -> PyLogger {
         self.inner().logger.clone()
@@ -616,6 +680,85 @@ impl PyExecutionAlgorithm {
     #[pyo3(name = "is_registered")]
     fn py_is_registered(&self) -> bool {
         self.inner().core.actor.is_registered()
+    }
+
+    #[pyo3(name = "is_ready")]
+    fn py_is_ready(&self) -> bool {
+        Component::is_ready(self)
+    }
+
+    #[pyo3(name = "is_running")]
+    fn py_is_running(&self) -> bool {
+        Component::is_running(self)
+    }
+
+    #[pyo3(name = "is_stopped")]
+    fn py_is_stopped(&self) -> bool {
+        Component::is_stopped(self)
+    }
+
+    #[pyo3(name = "is_disposed")]
+    fn py_is_disposed(&self) -> bool {
+        Component::is_disposed(self)
+    }
+
+    #[pyo3(name = "is_degraded")]
+    fn py_is_degraded(&self) -> bool {
+        Component::is_degraded(self)
+    }
+
+    #[pyo3(name = "is_faulted")]
+    fn py_is_faulted(&self) -> bool {
+        Component::is_faulted(self)
+    }
+
+    #[pyo3(name = "start")]
+    fn py_start(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::start(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "stop")]
+    fn py_stop(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::stop(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "resume")]
+    fn py_resume(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::resume(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "reset")]
+    fn py_reset(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::reset(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "dispose")]
+    fn py_dispose(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::dispose(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "degrade")]
+    fn py_degrade(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::degrade(&mut exec_algorithm).map_err(to_pyruntime_err)
+    }
+
+    #[pyo3(name = "fault")]
+    fn py_fault(slf: PyRef<'_, Self>) -> PyResult<()> {
+        let mut exec_algorithm = slf.clone();
+        drop(slf);
+        Component::fault(&mut exec_algorithm).map_err(to_pyruntime_err)
     }
 
     #[pyo3(name = "publish_data")]
@@ -639,6 +782,18 @@ impl PyExecutionAlgorithm {
         let value_str: String = value.bind(py).str()?.extract()?;
         DataActor::publish_signal(self, name, value_str, UnixNanos::from(ts_event));
         Ok(())
+    }
+
+    #[pyo3(name = "subscribe_signal")]
+    #[pyo3(signature = (name="", priority=None))]
+    fn py_subscribe_signal(&mut self, name: &str, priority: Option<u32>) {
+        DataActor::subscribe_signal(self, name, priority);
+    }
+
+    #[pyo3(name = "unsubscribe_signal")]
+    #[pyo3(signature = (name=""))]
+    fn py_unsubscribe_signal(&mut self, name: &str) {
+        DataActor::unsubscribe_signal(self, name);
     }
 
     #[pyo3(name = "on_start")]
@@ -665,6 +820,10 @@ impl PyExecutionAlgorithm {
     #[allow(unused_variables, clippy::needless_pass_by_value)]
     #[pyo3(name = "on_time_event")]
     fn py_on_time_event(&mut self, event: TimeEvent) {}
+
+    #[allow(unused_variables)]
+    #[pyo3(name = "on_signal")]
+    fn py_on_signal(&mut self, signal: &Signal) {}
 
     #[allow(clippy::needless_pass_by_value)]
     #[pyo3(name = "execute")]
@@ -803,6 +962,12 @@ impl PyExecutionAlgorithm {
         ))
     }
 
+    #[pyo3(name = "deny_order")]
+    fn py_deny_order(&mut self, py: Python<'_>, order: Py<PyAny>, reason: &str) -> PyResult<()> {
+        let order = pyobject_to_order_any(py, order)?;
+        ExecutionAlgorithm::deny_order(self, &order, Ustr::from(reason)).map_err(to_pyruntime_err)
+    }
+
     #[pyo3(name = "submit_order")]
     #[pyo3(signature = (order, position_id=None, client_id=None))]
     fn py_submit_order(
@@ -936,6 +1101,10 @@ impl PyExecutionAlgorithm {
     fn py_on_order_filled(&mut self, event: OrderFilled) {}
 
     #[allow(unused_variables, clippy::needless_pass_by_value)]
+    #[pyo3(name = "on_order_fill_voided")]
+    fn py_on_order_fill_voided(&mut self, event: OrderFillVoided) {}
+
+    #[allow(unused_variables, clippy::needless_pass_by_value)]
     #[pyo3(name = "on_position_opened")]
     fn py_on_position_opened(&mut self, event: PositionOpened) {}
 
@@ -950,6 +1119,52 @@ impl PyExecutionAlgorithm {
     #[allow(unused_variables, clippy::needless_pass_by_value)]
     #[pyo3(name = "on_position_closed")]
     fn py_on_position_closed(&mut self, event: PositionClosed) {}
+}
+
+impl PyExecutionAlgorithm {
+    /// Applies Python configuration overrides.
+    ///
+    /// Returns whether the config supplied an execution algorithm ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an ID has an unsupported type or invalid value.
+    pub fn configure_from_py_config(&mut self, config: &Bound<'_, PyAny>) -> anyhow::Result<bool> {
+        let id = config
+            .getattr("exec_algorithm_id")
+            .ok()
+            .filter(|id| !id.is_none())
+            .or_else(|| config.getattr("actor_id").ok().filter(|id| !id.is_none()));
+        let has_id = if let Some(id) = id {
+            let exec_algorithm_id = if let Ok(exec_algorithm_id) = id.extract::<ExecAlgorithmId>() {
+                exec_algorithm_id
+            } else if let Ok(actor_id) = id.extract::<ActorId>() {
+                ExecAlgorithmId::new_checked(actor_id.inner().as_str())?
+            } else if let Ok(id) = id.extract::<String>() {
+                ExecAlgorithmId::new_checked(&id)?
+            } else {
+                anyhow::bail!("Invalid `exec_algorithm_id`/`actor_id` type");
+            };
+            self.set_exec_algorithm_id(exec_algorithm_id);
+            true
+        } else {
+            false
+        };
+
+        if let Ok(log_events) = config.getattr("log_events")
+            && let Ok(log_events) = log_events.extract::<bool>()
+        {
+            self.set_log_events(log_events);
+        }
+
+        if let Ok(log_commands) = config.getattr("log_commands")
+            && let Ok(log_commands) = log_commands.extract::<bool>()
+        {
+            self.set_log_commands(log_commands);
+        }
+
+        Ok(has_id)
+    }
 }
 
 #[pyo3::pymethods]
