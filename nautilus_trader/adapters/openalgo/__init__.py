@@ -18,6 +18,9 @@ from nautilus_trader.adapters.openalgo.execution import OpenAlgoExecutionClient
 from nautilus_trader.adapters.openalgo.factories import OpenAlgoLiveExecClientFactory
 from nautilus_trader.adapters.openalgo.factories import get_cached_openalgo_http_client
 from nautilus_trader.adapters.openalgo.factories import get_cached_openalgo_instrument_provider
+from nautilus_trader.adapters.openalgo.options import OpenAlgoRelativeStrike
+from nautilus_trader.adapters.openalgo.options import RelativeStrikeKind
+from nautilus_trader.adapters.openalgo.options import resolve_openalgo_option
 from nautilus_trader.adapters.openalgo.providers import OpenAlgoInstrumentProvider
 
 
@@ -26,6 +29,9 @@ __all__ = [
     "OpenAlgoExecutionClient",
     "OpenAlgoInstrumentProvider",
     "OpenAlgoLiveExecClientFactory",
+    "OpenAlgoRelativeStrike",
+    "RelativeStrikeKind",
     "get_cached_openalgo_http_client",
     "get_cached_openalgo_instrument_provider",
+    "resolve_openalgo_option",
 ]

@@ -23,8 +23,27 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod http;
+pub mod options;
 
 #[cfg(feature = "python")]
 pub mod python;
 
 pub use crate::http::client::OpenAlgoHttpClient;
+pub use crate::{
+    http::models::{
+        MultiOptionGreeksInstrument, MultiOptionGreeksResponse, MultiOptionGreeksSummary,
+    },
+    options::{
+        execution::OpenAlgoOptionsAdapter,
+        models::{
+            BookedLegState, BookedOptionLeg, OptionAction, OptionLegSpec, OptionPriceType,
+            OptionProduct, OptionType, OptionsBooking, OptionsCloseOutcome, PartialSuccessPolicy,
+            RejectedOptionLeg, RelativeOptionsOrder, RelativeStrike, ResolvedOptionLeg,
+        },
+    },
+};
+pub use openalgo::{
+    BasketOrderItem, BasketOrderResponse, ExpiryResponse, OptionChainResponse,
+    OptionGreeksResponse, OptionSymbolResponse, OptionsLeg, OptionsMultiOrderResponse,
+    OptionsOrderResponse, QuotesResponse, SyntheticFutureResponse,
+};
