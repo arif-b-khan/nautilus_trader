@@ -13,5 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-pub mod client;
+//! Generic relative-options selection and execution for OpenAlgo.
+
+pub mod execution;
 pub mod models;

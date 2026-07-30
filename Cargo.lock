@@ -7459,9 +7459,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openalgo"
-version = "1.0.5"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63f464ef4c8f886e328ca7f3856a47a862473d7f0d978560026b923e67ffa5ef"
+checksum = "532cb94f308c59c63ddd953c455152584cceb548dfb01081488b52de85e192ab"
 dependencies = [
  "futures-util",
  "log",
