@@ -39,7 +39,10 @@ use nautilus_common::{providers::InstrumentProvider, testing::wait_until_async};
 use nautilus_model::{identifiers::InstrumentId, instruments::Instrument};
 use nautilus_network::{http::HttpClient, retry::RetryConfig};
 use nautilus_polymarket::{
-    common::{credential::Credential, enums::PolymarketOrderType},
+    common::{
+        credential::Credential,
+        enums::{PolymarketOrderType, SignatureType},
+    },
     config::{PolymarketInstrumentProviderConfig, PolymarketUpDownEventSlugConfig},
     filters::{
         EventParamsFilter, EventSlugFilter, GammaQueryFilter, MarketSlugFilter, SearchFilter,
@@ -52,7 +55,7 @@ use nautilus_polymarket::{
         gamma::{PolymarketGammaHttpClient, PolymarketGammaRawHttpClient},
         models::PolymarketOrder,
         query::{
-            CancelMarketOrdersParams, GetBalanceAllowanceParams, GetGammaEventsParams,
+            AssetType, CancelMarketOrdersParams, GetBalanceAllowanceParams, GetGammaEventsParams,
             GetGammaMarketsParams, GetOrdersParams, GetSearchParams, GetTradesParams,
         },
     },
@@ -267,6 +270,22 @@ async fn handle_get_balance(State(state): State<TestServerState>, headers: Heade
     }
     *state.last_headers.lock().await = extract_headers(&headers);
     Json(load_json("http_balance_allowance_collateral.json")).into_response()
+}
+
+async fn handle_update_balance(
+    State(state): State<TestServerState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    *state.last_headers.lock().await = extract_headers(&headers);
+    *state.last_path.lock().await = Some("/balance-allowance/update".to_string());
+    if params.get("asset_type").map(String::as_str) == Some("COLLATERAL")
+        && params.get("signature_type").map(String::as_str) == Some("0")
+    {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::BAD_REQUEST.into_response()
+    }
 }
 
 async fn handle_post_order(
@@ -609,6 +628,7 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/data/order/{id}", get(handle_get_order))
         .route("/data/trades", get(handle_get_trades))
         .route("/balance-allowance", get(handle_get_balance))
+        .route("/balance-allowance/update", get(handle_update_balance))
         .route(
             "/order",
             post(handle_post_order).delete(handle_delete_order),
@@ -702,6 +722,35 @@ async fn test_get_balance_allowance_returns_data() {
     assert_eq!(
         balance.allowance,
         Some(rust_decimal_macros::dec!(999_999_999_000_000)),
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_update_balance_allowance_accepts_empty_response() {
+    let state = TestServerState::default();
+    let addr = start_mock_server(state.clone()).await;
+    let client = create_clob_client(&addr);
+
+    client
+        .update_balance_allowance(GetBalanceAllowanceParams {
+            asset_type: Some(AssetType::Collateral),
+            signature_type: Some(SignatureType::Eoa),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.last_path.lock().await.as_deref(),
+        Some("/balance-allowance/update")
+    );
+    assert!(
+        state
+            .last_headers
+            .lock()
+            .await
+            .contains_key("poly_signature")
     );
 }
 
@@ -2433,6 +2482,44 @@ async fn test_fetch_gamma_markets_stops_at_total_cap() {
 
 #[rstest]
 #[tokio::test]
+async fn test_fetch_gamma_markets_rejects_repeated_cursor() {
+    let state = TestServerState::default();
+    let market = gamma_market_with_slug(
+        "stuck-market",
+        "0xcondition_stuck_market",
+        ["97300000000000000001", "97300000000000000002"],
+    );
+    {
+        let mut pages = state.gamma_markets_pages.lock().await;
+        pages.push_back(json!({
+            "markets": [market.clone()],
+            "next_cursor": "stuck",
+        }));
+        pages.push_back(json!({
+            "markets": [market],
+            "next_cursor": "stuck",
+        }));
+    }
+    let addr = start_mock_server(state.clone()).await;
+    let client = create_gamma_domain_client(&addr);
+
+    let error = client
+        .request_markets_by_params(GetGammaMarketsParams {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Gamma market pagination repeated cursor \"stuck\""
+    );
+    assert_eq!(state.gamma_markets_query_log.lock().await.len(), 2);
+}
+
+#[rstest]
+#[tokio::test]
 async fn test_fetch_gamma_events_paginated_uses_next_cursor_and_500_limit() {
     let state = TestServerState::default();
     let market_a = gamma_market_with_slug(
@@ -2527,6 +2614,45 @@ async fn test_fetch_gamma_events_stops_at_total_cap() {
 
     assert_eq!(instruments.len(), 2);
     assert_eq!(state.gamma_events_query_log.lock().await.len(), 1);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_fetch_gamma_events_rejects_repeated_cursor() {
+    let state = TestServerState::default();
+    let market = gamma_market_with_slug(
+        "stuck-event-market",
+        "0xcondition_stuck_event",
+        ["98300000000000000001", "98300000000000000002"],
+    );
+    let event = gamma_event_with_markets("stuck-event", &[market]);
+    {
+        let mut pages = state.gamma_events_pages.lock().await;
+        pages.push_back(json!({
+            "events": [event.clone()],
+            "next_cursor": "stuck",
+        }));
+        pages.push_back(json!({
+            "events": [event],
+            "next_cursor": "stuck",
+        }));
+    }
+    let addr = start_mock_server(state.clone()).await;
+    let client = create_gamma_domain_client(&addr);
+
+    let error = client
+        .request_events_by_params(GetGammaEventsParams {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Gamma event pagination repeated cursor \"stuck\""
+    );
+    assert_eq!(state.gamma_events_query_log.lock().await.len(), 2);
 }
 
 #[rstest]
