@@ -83,6 +83,7 @@ adapter set. The following limits remain deferred:
 - Added v2 `OrderFillVoided`, `OrderStatus.VOIDED`, terminal voiding, and strategy and algorithm callbacks
 - Added Python v2 controller subclassing and importable controller configs for backtest/live
 - Added Python v2 subclassable execution algorithms for routed orders
+- Added Python v2 execution algorithm config subclassing and importable config export
 - Added Python v2 `ExecutionAlgorithm.deny_order` with terminal denial of invalid TWAP inputs
 - Added Python v2 `ExecutionAlgorithm` portfolio, lifecycle, signals, and constructed live registration
 - Added Python v2 `BacktestNode` post-run cache, portfolio, statistics, and report inspection
@@ -108,6 +109,7 @@ adapter set. The following limits remain deferred:
 - Added Bybit spot `margin_trading` instrument info field (#4540), thanks @dxwil
 - Added Bybit v2 automatic SPOT margin borrow repayment (#4543), thanks @dxwil
 - Added Blockchain pool analysis to build exact checkpoint snapshots without storing full swap history
+- Added DeFi pool `CurrencyPair` caching and publication with pool IDs, token‑derived precision, and `taker_fee`
 - Added Architect AX dated futures parsing and configurable WebSocket heartbeat and disconnect cancellation
 - Added Architect AX funding-slot schedule requests via `GET /funding-slots`
 - Added Architect AX Python v2 data and execution client factory bindings
@@ -127,9 +129,14 @@ adapter set. The following limits remain deferred:
 - Added v2 `Decimal` order fill pricing; `Order.avg_px` and `Order.slippage` no longer round through `f64`
 
 ### Breaking Changes
+- Changed DeFi `Pool` instrument conversion to preserve pool IDs; update callers keyed by token‑pair symbols
 - Changed L3 books to move IDs re‑added at a new price on the same side, fixing ghost levels
 - Changed L3 books to derive price‑based order IDs for orders with a zero order ID
 - Changed Rust `BookIntegrityError` to add `AmbiguousOrderSide`; update exhaustive matches
+- Changed Rust `EncodingError` and `SbeEncodeError` to add `MixedMetadata` and `ReservedValue`;
+  update exhaustive matches
+- Changed Rust `LighterHttpError` to add `HistoryIncomplete`; update exhaustive matches
+- Changed unstable Cap'n Proto `BarSpec.step` from `UInt32` to `UInt64`
 - Changed v2 `PortfolioConfig.use_mark_prices` to prefer marks by default; set `false` to skip marks
 - Changed Rust `Cache::snapshot_position` to return `()`; use `snapshot_position_encoded` when the encoded frame is needed
 - Changed Rust time-event channels to `TimeEventMessage`; callbacks are no longer `Send + Sync` (#4496), thanks @folknor
@@ -165,7 +172,12 @@ adapter set. The following limits remain deferred:
 - Fixed time-event callback teardown aborting during thread-local destruction (#4516), thanks @folknor
 - Fixed `CVec` ownership and FFI reconstruction issues that could cause undefined behavior (#4499), thanks @folknor
 - Fixed DeFi `SwapTradeInfo` calculations panicking on a zero prior spot price
+- Fixed DeFi spot and execution prices panicking or silently wrapping on high ratios and unsupported token decimals
 - Fixed fixed-risk position sizing panics from invalid inputs, overflow, and quantity conversion (#4573), thanks @dfjmax
+- Fixed Arrow batch encoders silently re-labeling mixed metadata and leading clear deltas
+- Fixed SBE `FundingRateUpdate` maximum optional values encoding as absent
+- Fixed Cap'n Proto `Price` and `Quantity` decoding panicking on malformed precision
+- Fixed Cap'n Proto `BarSpec.step` truncating values above `u32::MAX`
 
 ### Fixes
 - Fixed order book `NoOrderSide` deltas mutating the bid side when the ID is on both book sides
@@ -266,6 +278,8 @@ adapter set. The following limits remain deferred:
 - Fixed Rust and Python v2 zero-duration waits to recognize already-ready engines
 - Fixed Rust v2 `LiveNode` startup to restore cache databases and honor `flush_on_start`
 - Fixed Rust v2 `LiveNode` startup continuing after execution reconciliation failures or timeouts (#4406), thanks @TheoBabilon
+- Fixed Rust and Python v2 `LiveNode` losing stop requests received during startup
+- Fixed v2 `LiveExecEngineConfig` accepting non‑positive, non‑finite, sub‑nanosecond, or overflowing interval seconds
 - Fixed Rust and Python v2 live node connect and disconnect awaits running outside the lifecycle timeouts (#4528), thanks @folknor
 - Fixed Rust and Python v2 live node connection timeouts reporting the node as running (#4528), thanks @folknor
 - Fixed Rust/PyO3 live nodes to apply configured default and venue client routing (#4408), thanks @dfjmax
@@ -341,6 +355,8 @@ adapter set. The following limits remain deferred:
 - Fixed BitMEX WebSocket authentication rejections waiting out the login timeout instead of failing (#4541), thanks @folknor
 - Fixed Blockchain `U256` price and quantity decoding losing exact raw units above the `f64` integer limit
 - Fixed Blockchain HyperSync live pool-event streams overreaching the tip window
+- Fixed Blockchain pool‑event sync to backfill missing protocol‑fee history; run `make init-db` for schema changes
+- Fixed Blockchain pool-event unsubscribe leaving internally owned block feeds active
 - Fixed Blockchain RPC pool snapshots panicking on incomplete topology
 - Fixed Bybit post-only rejections omitting the `due_post_only` flag (#4500), thanks @dxwil
 - Fixed Bybit spot instruments missing `min_notional` and the newer lot-size fields (#4527), thanks @dxwil
@@ -412,11 +428,13 @@ adapter set. The following limits remain deferred:
 - Fixed Kraken Futures fill parsing for all documented `fillType` values (#4591), thanks for reporting @Andreas197510
 - Fixed Kraken financial values losing precision through floating-point parsing and arithmetic
 - Fixed Lighter batch orders to use correlated sequential WebSocket transactions
+- Fixed Lighter bar and funding‑rate requests returning page‑capped partial history as success
 - Fixed Lighter live funding updates exposing `funding_timestamp` as `next_funding_ns`
 - Fixed Lighter reconciliation cursor loops, fill deduplication, and trailing fill identity
 - Fixed Lighter instrument parsing, gap candle filtering, and spot quote currencies
 - Fixed Lighter modify validation, conditional acks, nonce recovery, auth refresh, and WS timeouts
 - Fixed Lighter ambiguous sends, response attribution, order identity collisions, and GTD expiry
+- Fixed Lighter zero‑quantity rows in `account_all_positions` snapshots remaining in cached position reports
 - Fixed OKX price-limit metadata parsing and public limit-price requests (#4413)
 - Fixed OKX v2 yearly candle bar validation and round trips
 - Fixed Polymarket v1 and v2 allowances for the current Neg Risk adapter
@@ -459,6 +477,7 @@ adapter set. The following limits remain deferred:
 - Upgraded `ed25519-dalek` crate to v3.0.0
 - Upgraded `futures` crate to v0.3.33
 - Upgraded `redis` crate to v1.4.1
+- Upgraded `rustls` crate to v0.23.43
 - Upgraded `sockudo-ws` crate to v2.0.1
 - Upgraded `tokio` crate to v1.53.1
 - Upgraded `tokio-tungstenite` crate to v0.30.0

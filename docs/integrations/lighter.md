@@ -403,9 +403,10 @@ nonce refresh are mandatory. A client can be constructed without credentials, bu
 will not connect until `private_key`, `account_index`, and `api_key_index` resolve.
 
 Perpetual positions use netting mode with one position per market; spot balances use account asset
-state. Each `account_all_positions` frame is a snapshot: omitted cached markets flatten, and an
-empty `positions` map flattens all cached positions. Unmapped or unparsable rows remain keyed by
-market ID so they do not cause false flat reports.
+state. Each `account_all_positions` frame is a snapshot: cached markets omitted from the frame, or
+present with a zero `position` value, flatten. An empty `positions` map flattens all cached
+positions. Unmapped or unparsable rows with a non‑zero position remain keyed by market ID so they do
+not cause false flat reports.
 
 | Feature                 | Perpetuals | Spot | Notes                                                        |
 | ----------------------- | ---------- | ---- | ------------------------------------------------------------ |
@@ -437,7 +438,8 @@ provide no future settlement time, live updates leave `interval` and `next_fundi
 
 Historical requests use public `/api/v1/fundings` rows at `1h` resolution and set `interval=60`.
 `direction=long` stays positive, while `short` becomes negative. Pagination covers the requested
-range, subject to an explicit `limit`; account‑specific `positionFunding` is not used.
+range up to the adapter's page cap, subject to an explicit `limit`; see
+[Rate limiting](#rate-limiting). Account‑specific `positionFunding` is not used.
 
 ## Account tiers
 
@@ -520,6 +522,13 @@ Common REST endpoint weights from the official docs:
 | `sendTxBatch` batch size               | 15 txs     | Low‑level API limit; fanout cap is also 15.          |
 | WebSocket keepalive                    | 2 minutes  | Adapter sends heartbeats every 30 seconds.           |
 | WebSocket outbound command queue       | Not capped | Paced before writes; no queue‑depth cap.             |
+
+Historical bar and funding‑rate requests stop after 500 REST pages. This covers up to 250,000 bars
+or 49,500 hourly funding intervals. If the cap leaves part of the requested range uncovered, the
+HTTP client returns `LighterHttpError::HistoryIncomplete` instead of partial history and does not
+retry the capped request. Completion on the final allowed page remains successful. A request with
+an explicit `start` also remains successful when its explicit `limit` is satisfied. The data client
+logs the incomplete error and emits no response; narrow the requested range to continue.
 
 ## Volume quota and no-fill quoting
 
