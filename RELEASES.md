@@ -50,13 +50,15 @@ The supported cutover workflows cover Python strategies, actors, backtests, live
 and execution, portfolio/accounting, data catalogs, reports, tearsheets, and the current Rust-backed
 adapter set. The following limits remain deferred:
 
-- Python request callback, join, and pending-request convenience semantics.
+- Python request callbacks do not provide v1 joined-response, pending-request cleanup, or late and
+  duplicate delivery convenience behavior.
 - Direct Python `LiveNode` injection for Redis cache databases and external message-bus backing.
 - SQL cache position and synthetic loads, state persistence, and heartbeat.
 - External message-bus publication of serialized order and position snapshots.
 - V1 `StreamingConfig` and `DataCatalogConfig` iterator wiring on the v2 `BacktestNode`.
 - V1 adapter instrument-provider filters; Hyperliquid v2 loads the configured universe.
 - Published tutorials still use v1; generated v2 stubs and `python/examples/` show the current API.
+- Static typing does not cover three Kraken batch methods or adapter wire DTO runtime attributes.
 
 ### Enhancements
 - Added opt-in `mimalloc` allocator feature, enabled by default for Python wheels (#4358), thanks @ivannp
@@ -102,6 +104,7 @@ adapter set. The following limits remain deferred:
 - Added Binance GTD expiry support for USD-M and local expiry mapping for Spot and COIN-M
 - Added Binance v2 extended bars, bounded history, snapshots, tickers, estimated settlement prices, and L1 books
 - Added Binance USD-M (monthly and quarterly) and COIN-M (quarterly) delivery futures support
+- Added Binance v2 USD-M TradFi perpetual instrument support (#4488), thanks @M4n5ter
 - Added Binance v2 instrument filters, fees, scheduled refresh, proxy, and receive-window configuration
 - Added Binance US Spot JSON data and HMAC execution to the Rust-backed v2 adapter
 - Added Binance Python v2 constants, instrument loading, order book CSV loading, and client-order-ID decoders
@@ -118,6 +121,7 @@ adapter set. The following limits remain deferred:
 - Added Hyperliquid opt-in stale stream recovery with targeted resubscribe and reconnect escalation (#4298)
 - Added Hyperliquid persistable `HyperliquidPublicTrade` custom data (#4468), thanks @graceyangfan
 - Added Interactive Brokers PyO3 type stub annotations (#4350), thanks @dfjmax
+- Added OKX RPI market data and order execution support
 - Added PancakeSwap V3 protocol-fee replay accounting; run `make init-db` for schema changes
 - Added Polymarket v2 opt-in authenticated order-safety heartbeats
 - Added Polymarket v2 fill `info` metadata carrying the raw venue trade fields
@@ -133,8 +137,7 @@ adapter set. The following limits remain deferred:
 - Changed L3 books to move IDs re‑added at a new price on the same side, fixing ghost levels
 - Changed L3 books to derive price‑based order IDs for orders with a zero order ID
 - Changed Rust `BookIntegrityError` to add `AmbiguousOrderSide`; update exhaustive matches
-- Changed Rust `EncodingError` and `SbeEncodeError` to add `MixedMetadata` and `ReservedValue`;
-  update exhaustive matches
+- Changed Rust `EncodingError` and `SbeEncodeError` to add `MixedMetadata` and `ReservedValue`; update exhaustive matches
 - Changed Rust `LighterHttpError` to add `HistoryIncomplete`; update exhaustive matches
 - Changed unstable Cap'n Proto `BarSpec.step` from `UInt32` to `UInt64`
 - Changed v2 `PortfolioConfig.use_mark_prices` to prefer marks by default; set `false` to skip marks
@@ -174,6 +177,7 @@ adapter set. The following limits remain deferred:
 - Fixed DeFi `SwapTradeInfo` calculations panicking on a zero prior spot price
 - Fixed DeFi spot and execution prices panicking or silently wrapping on high ratios and unsupported token decimals
 - Fixed fixed-risk position sizing panics from invalid inputs, overflow, and quantity conversion (#4573), thanks @dfjmax
+- Fixed v2 `CompetitionAwareFillModel` and `VolumeSensitiveFillModel` panics on invalid or overflowing liquidity
 - Fixed Arrow batch encoders silently re-labeling mixed metadata and leading clear deltas
 - Fixed SBE `FundingRateUpdate` maximum optional values encoding as absent
 - Fixed Cap'n Proto `Price` and `Quantity` decoding panicking on malformed precision
@@ -230,6 +234,8 @@ adapter set. The following limits remain deferred:
 - Fixed v2 matching engine stop and touch orders to honor last-price triggers (#4481), thanks for reporting @mgd134
 - Fixed v2 matching engine quote-bar execution to honor `bar_adaptive_high_low_ordering` (v1 parity)
 - Fixed v2 matching engine `reset` to clear cached bid/ask bars, preventing stale pairs across runs
+- Fixed v2 order emulation leaving immediately matched submissions and modifications pending
+- Fixed v2 order emulation retaining stale trigger and limit prices after modification (v1 parity)
 - Fixed v2 volume aggregation step thresholds to use exact integer arithmetic instead of floating-point conversion
 - Fixed v2 `ValueBarAggregator` to accumulate value in `Decimal` matching the v1 implementation
 - Fixed v2 internal bar aggregation dropping the first tick in backtests
@@ -283,6 +289,7 @@ adapter set. The following limits remain deferred:
 - Fixed Rust and Python v2 live node connect and disconnect awaits running outside the lifecycle timeouts (#4528), thanks @folknor
 - Fixed Rust and Python v2 live node connection timeouts reporting the node as running (#4528), thanks @folknor
 - Fixed Rust/PyO3 live nodes to apply configured default and venue client routing (#4408), thanks @dfjmax
+- Fixed v2 execution client deregistration blocking registration of a replacement default client (v1 parity)
 - Fixed `OrderFactory.bracket` `tp_post_only` docs (#4437), thanks for reporting @jh171717 and @chang-pro for the patch
 - Fixed `PerContractFeeModel` generic spread fees per leg ratio (#4360), thanks for reporting @pjlegato and @faysou for the patch
 - Fixed `HEDGING` reduce-only orders without cached position IDs (#4312), thanks for reporting @luckykefu
@@ -433,7 +440,7 @@ adapter set. The following limits remain deferred:
 - Fixed Lighter reconciliation cursor loops, fill deduplication, and trailing fill identity
 - Fixed Lighter instrument parsing, gap candle filtering, and spot quote currencies
 - Fixed Lighter modify validation, conditional acks, nonce recovery, auth refresh, and WS timeouts
-- Fixed Lighter ambiguous sends, response attribution, order identity collisions, and GTD expiry
+- Fixed Lighter ambiguous sends, response attribution, live order identity binding, index collisions, and GTD expiry
 - Fixed Lighter zero‑quantity rows in `account_all_positions` snapshots remaining in cached position reports
 - Fixed OKX price-limit metadata parsing and public limit-price requests (#4413)
 - Fixed OKX v2 yearly candle bar validation and round trips
@@ -451,6 +458,10 @@ adapter set. The following limits remain deferred:
 - Fixed v2 sandbox execution retaining matching engines and cache state for expired quote-only instruments
 - Fixed v2 quadratic NETTING backtest CPU and memory growth from position replay logs retained in snapshot blobs and per-fill account event-log clones (#4546), thanks @HungNgo4444
 - Fixed Rust `Throttler` stranding buffered messages after a rejected `try_reserve`, breaking drain order
+- Fixed v2 reconciliation booking negative back-solved inferred fill prices on instruments that disallow them
+- Fixed v2 reconciliation dropping inferred fills and voids when the venue average was unusable
+- Fixed v2 `RiskEngine` skipping cash and betting account balance checks for reduce-only buy orders
+- Fixed v2 `RiskEngine` rate-limit modify-order rejections omitting the order `account_id`
 
 ### Internal Improvements
 - Standardized Rust adapter task‑handle storage with `TaskHandles` while retaining client‑local spawn and shutdown policies
@@ -459,6 +470,7 @@ adapter set. The following limits remain deferred:
 - Improved Clippy compatibility for nightly and all-feature Rust builds (#4505), thanks @folknor
 - Improved `Quantity` tests across feature‑conditional precision modes (#4556), thanks @folknor
 - Improved pre-commit checks for DST, Python errors, and Cargo dependency groups (#4506), thanks @folknor
+- Improved DST coverage for `nautilus-backtest` run timestamps and convention enforcement
 - Improved core decimal deserialization to round fractional scales above 28 digits instead of erroring
 - Improved v2 NETTING backtest throughput by ~17% by encoding position snapshot frames only when a consumer reads them
 - Improved live reconciliation recency tracking with `RecencyMap` (#4386), thanks @folknor
@@ -467,6 +479,7 @@ adapter set. The following limits remain deferred:
 - Improved Lighter signing and execution coverage for conditional, IOC, cancel-all, and leverage transactions
 - Improved adapter test runtime by replacing fixed waits in the Betfair, dYdX, Polymarket, and OKX suites (#4531, #4532, #4539, #4547), thanks @folknor
 - Improved adapter test runtime for Architect AX (#4554), BitMEX (#4555), and Bybit (#4553), thanks @folknor
+- Optimized Polymarket WebSocket parsing and authenticated request signing
 - Upgraded Binance Spot SBE REST and WebSocket API requests to schema `3:5` (Rust)
 - Upgraded Rust (MSRV) to 1.97.1
 - Upgraded Cython to v3.2.9
