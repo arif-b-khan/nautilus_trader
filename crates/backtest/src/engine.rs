@@ -46,6 +46,7 @@ use nautilus_common::{
 };
 use nautilus_core::{
     UUID4, UnixNanos, datetime::unix_nanos_to_iso8601, string::formatting::Separable,
+    time::nanos_since_unix_epoch,
 };
 use nautilus_data::client::DataClientAdapter;
 use nautilus_execution::models::fill::FillModelHandle;
@@ -73,7 +74,10 @@ use crate::{
     data_iterator::BacktestDataIterator,
     exchange::SimulatedExchange,
     execution_client::BacktestExecutionClient,
-    result::BacktestResult,
+    result::{
+        BacktestResult, CanonicalBacktestResult, CanonicalBacktestState, CanonicalDiagnostic,
+        CanonicalDiagnosticCode, CanonicalRunOutcome,
+    },
 };
 
 /// Core backtesting engine for running event-driven strategy backtests on historical data.
@@ -99,6 +103,7 @@ pub struct BacktestEngine {
     exec_clients: Vec<BacktestExecutionClient>,
     has_data: AHashSet<InstrumentId>,
     has_book_data: AHashSet<InstrumentId>,
+    has_book_processed: AHashSet<InstrumentId>,
     data_iterator: BacktestDataIterator,
     data_len: usize,
     data_stream_counter: usize,
@@ -115,6 +120,7 @@ pub struct BacktestEngine {
     run_finished: Option<UnixNanos>,
     backtest_start: Option<UnixNanos>,
     backtest_end: Option<UnixNanos>,
+    funding_error: Option<String>,
 }
 
 impl Debug for BacktestEngine {
@@ -164,6 +170,7 @@ impl BacktestEngine {
             exec_clients: Vec::new(),
             has_data: AHashSet::new(),
             has_book_data: AHashSet::new(),
+            has_book_processed: AHashSet::new(),
             data_iterator: BacktestDataIterator::new(),
             data_len: 0,
             data_stream_counter: 0,
@@ -180,6 +187,7 @@ impl BacktestEngine {
             run_finished: None,
             backtest_start: None,
             backtest_end: None,
+            funding_error: None,
         })
     }
 
@@ -262,19 +270,22 @@ impl BacktestEngine {
 
     /// # Errors
     ///
-    /// Returns an error if initializing the simulated exchange for the venue fails.
+    /// Returns an error if the venue is already registered, initializing the simulated exchange
+    /// fails, or registering its execution client fails.
     pub fn add_venue(&mut self, config: SimulatedVenueConfig) -> anyhow::Result<()> {
         // `routing` and `frozen_account` flow to the exec client, so capture
         // them before the config is consumed by the exchange constructor.
         let venue = config.venue;
+        if self.venues.contains_key(&venue) {
+            anyhow::bail!("Venue {venue} is already registered");
+        }
+
         let routing = Some(config.routing);
         let frozen_account = Some(config.frozen_account);
 
         let exchange =
             SimulatedExchange::new(config, self.kernel.cache.clone(), self.kernel.clock.clone())?;
         let exchange = Rc::new(RefCell::new(exchange));
-        SimulatedExchange::register_spread_quote_endpoint(&exchange);
-        self.venues.insert(venue, exchange.clone());
 
         let account_id = AccountId::from(format!("{venue}-001").as_str());
 
@@ -292,12 +303,14 @@ impl BacktestEngine {
             .borrow_mut()
             .register_client(Rc::new(exec_client.clone()));
 
-        self.exec_clients.push(exec_client.clone());
-
         self.kernel
             .exec_engine
             .borrow_mut()
-            .register_client(Box::new(exec_client))?;
+            .register_client(Box::new(exec_client.clone()))?;
+
+        SimulatedExchange::register_spread_quote_endpoint(&exchange);
+        self.venues.insert(venue, exchange);
+        self.exec_clients.push(exec_client);
 
         log::info!("Adding exchange {venue} to engine");
 
@@ -635,6 +648,11 @@ impl BacktestEngine {
     /// Timer advancement stops at data exhaustion to avoid producing synthetic
     /// events (e.g. zero-volume bars) past the current batch.
     ///
+    /// Each streaming batch must include every data item with its final `ts_init`;
+    /// splitting one replay timestamp across calls can finalize timers and venue
+    /// modules before later items at that timestamp. [`BacktestNode`](crate::node::BacktestNode)
+    /// aligns its chunks to this boundary.
+    ///
     /// Streaming workflow:
     /// 1. Add initial data and strategies
     /// 2. Loop: call `run(streaming=true)`, `clear_data()`, `add_data(next_batch)`
@@ -650,7 +668,16 @@ impl BacktestEngine {
         run_config_id: Option<String>,
         streaming: bool,
     ) -> anyhow::Result<()> {
-        self.run_impl(start, end, run_config_id, streaming)?;
+        if let Some(error) = &self.funding_error {
+            anyhow::bail!("{error}");
+        }
+
+        if let Err(e) = self.run_impl(start, end, run_config_id, streaming) {
+            if self.funding_error.is_some() {
+                self.abort_run();
+            }
+            return Err(e);
+        }
 
         // Finalize on non-streaming runs, or when a shutdown was triggered
         // at any point during the run (including the trailing settle, module,
@@ -685,7 +712,9 @@ impl BacktestEngine {
 
             for instrument_id in exchange.instrument_ids() {
                 let has_data = self.has_data.contains(instrument_id);
-                let missing_book_data = !self.has_book_data.contains(instrument_id);
+                let missing_book_data = !self.has_book_data.contains(instrument_id)
+                    && !self.has_book_processed.contains(instrument_id);
+
                 if has_data && missing_book_data {
                     anyhow::bail!(
                         "No order book data found for instrument '{instrument_id}' when `book_type` \
@@ -719,7 +748,7 @@ impl BacktestEngine {
 
             self.run_config_id = run_config_id;
             self.run_id = Some(UUID4::new());
-            self.run_started = Some(UnixNanos::from(std::time::SystemTime::now()));
+            self.run_started = Some(UnixNanos::from(nanos_since_unix_epoch()));
             self.backtest_start = Some(start_ns);
 
             for exchange in self.venues.values() {
@@ -804,7 +833,7 @@ impl BacktestEngine {
                     // and timers will fire naturally as time advances.
                     break;
                 }
-                let done = self.process_next_timer(&clocks);
+                let done = self.process_next_timer(&clocks)?;
                 data = self.data_iterator.next_item();
                 if data.is_none() && done {
                     break;
@@ -821,7 +850,7 @@ impl BacktestEngine {
 
             if ts_init > self.last_ns {
                 self.last_ns = ts_init;
-                self.advance_time_impl(ts_init, &clocks);
+                self.advance_time_impl(ts_init, &clocks)?;
             }
 
             // A timer fired during clock advance may have requested shutdown,
@@ -843,9 +872,8 @@ impl BacktestEngine {
 
             // If timestamp changed (or exhausted), flush timers then run modules
             if data.is_none() || data.as_ref().unwrap().ts_init() > prev_last_ns {
-                self.flush_accumulator_events(&clocks, prev_last_ns);
-                self.run_venue_modules(prev_last_ns);
-                self.run_venue_liquidations(prev_last_ns);
+                self.flush_accumulator_events(&clocks, prev_last_ns)?;
+                self.finalize_timestamp(&clocks, prev_last_ns)?;
             }
 
             self.iteration += 1;
@@ -853,9 +881,7 @@ impl BacktestEngine {
 
         // Process remaining exchange messages
         let ts_now = self.kernel.clock.borrow().timestamp_ns();
-        self.settle_venues(ts_now);
-        self.run_venue_modules(ts_now);
-        self.run_venue_liquidations(ts_now);
+        self.finalize_timestamp(&clocks, ts_now)?;
 
         // Cap at last_ns when streaming or after shutdown to avoid firing
         // timers past the current batch or the graceful stop
@@ -864,9 +890,21 @@ impl BacktestEngine {
         } else {
             end_ns
         };
-        self.flush_accumulator_events(&clocks, flush_ts);
+        self.flush_accumulator_events(&clocks, flush_ts)?;
 
         Ok(())
+    }
+
+    fn abort_run(&mut self) {
+        self.force_stop = true;
+        self.accumulator.clear();
+        self.kernel.stop_trader();
+        self.kernel.data_engine.borrow_mut().stop();
+        self.kernel.risk_engine.borrow_mut().stop();
+        self.kernel.exec_engine.borrow_mut().stop();
+        self.run_finished = Some(UnixNanos::from(nanos_since_unix_epoch()));
+        self.backtest_end = Some(self.kernel.clock.borrow().timestamp_ns());
+        logging_clock_set_realtime_mode();
     }
 
     /// Manually end the backtest.
@@ -882,6 +920,10 @@ impl BacktestEngine {
     ///
     /// Returns an error if actor or strategy state cannot be saved.
     pub(crate) fn end_with_result(&mut self) -> anyhow::Result<()> {
+        if let Some(error) = &self.funding_error {
+            anyhow::bail!("{error}");
+        }
+
         // Flush remaining timer events to the backtest end boundary so that
         // tail alerts/expiries scheduled after the last data point still fire.
         // Must run before stopping engines since DataEngine::stop() cancels
@@ -896,7 +938,12 @@ impl BacktestEngine {
                 self.end_ns
             };
 
-            self.flush_accumulator_events(&clocks, flush_ts);
+            if let Err(e) = self.flush_accumulator_events(&clocks, flush_ts) {
+                if self.funding_error.is_some() {
+                    self.abort_run();
+                }
+                return Err(e);
+            }
         }
 
         self.kernel.stop_trader();
@@ -928,7 +975,7 @@ impl BacktestEngine {
         self.kernel.risk_engine.borrow_mut().stop();
         self.kernel.exec_engine.borrow_mut().stop();
 
-        self.run_finished = Some(UnixNanos::from(std::time::SystemTime::now()));
+        self.run_finished = Some(UnixNanos::from(nanos_since_unix_epoch()));
         self.backtest_end = Some(self.kernel.clock.borrow().timestamp_ns());
 
         // Switch logging back to realtime mode
@@ -981,14 +1028,17 @@ impl BacktestEngine {
         self.run_finished = None;
         self.backtest_start = None;
         self.backtest_end = None;
+        self.funding_error = None;
         self.iteration = 0;
         self.force_stop = false;
         self.last_ns = UnixNanos::default();
         self.last_module_ns = None;
         self.last_liquidation_ns = None;
         self.end_ns = UnixNanos::default();
+        self.has_book_processed.clear();
 
         self.accumulator.clear();
+        self.cancel_funding_settlement_timers();
 
         // Reset all iterator cursors to beginning (data persists)
         self.data_iterator.reset_all_cursors();
@@ -1111,6 +1161,107 @@ impl BacktestEngine {
         }
     }
 
+    /// Returns the versioned deterministic projection of observable state from the last run.
+    ///
+    /// This projection excludes host, process, random identity, wall-clock, and elapsed-time noise.
+    /// It retains deterministic references between domain events and includes the observable cache,
+    /// account, portfolio, component, outcome, and diagnostic state available after the run ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if observable state cannot be projected into the canonical schema.
+    pub fn get_canonical_result(&self) -> anyhow::Result<CanonicalBacktestResult> {
+        let result = self.get_result();
+        let cache = self.kernel.cache.borrow();
+        let orders = cache
+            .orders(None, None, None, None, None)
+            .into_iter()
+            .map(|order| order.cloned())
+            .collect();
+        let positions = cache
+            .positions(None, None, None, None, None)
+            .into_iter()
+            .map(|position| position.cloned())
+            .collect();
+        let position_snapshots = cache.position_snapshots(None, None);
+        let accounts = cache.accounts_all_owned();
+        drop(cache);
+
+        let portfolio = self.kernel.portfolio.borrow();
+        let mut portfolio_snapshots = Vec::new();
+        for account in &accounts {
+            portfolio_snapshots.extend(portfolio.snapshots(&account.id()));
+        }
+        drop(portfolio);
+
+        let trader = self.kernel.trader.borrow();
+        let trader_state = trader.state().to_string();
+        let actor_ids = trader
+            .actor_ids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let strategy_ids = trader
+            .strategy_ids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let exec_algorithm_ids = trader
+            .exec_algorithm_ids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        drop(trader);
+
+        let outcome = if self.funding_error.is_some() {
+            CanonicalRunOutcome::Failed
+        } else if self.run_finished.is_none() {
+            CanonicalRunOutcome::Incomplete
+        } else if self.force_stop || self.kernel.is_shutdown_requested() {
+            CanonicalRunOutcome::Stopped
+        } else {
+            CanonicalRunOutcome::Completed
+        };
+        let diagnostics = self
+            .funding_error
+            .as_ref()
+            .map(|_| CanonicalDiagnostic {
+                code: CanonicalDiagnosticCode::FundingSettlementFailed,
+            })
+            .into_iter()
+            .collect();
+        let statistics = nautilus_analysis::PortfolioStatistics {
+            pnls: result.stats_pnls,
+            returns: result.stats_returns,
+            general: result.stats_general,
+            returns_series: result.returns_series,
+        };
+
+        CanonicalBacktestResult::from_state(CanonicalBacktestState {
+            trader_id: result.trader_id,
+            run_config_id: result.run_config_id,
+            backtest_start: result.backtest_start,
+            backtest_end: result.backtest_end,
+            iterations: result.iterations,
+            total_events: result.total_events,
+            total_orders: result.total_orders,
+            total_positions: result.total_positions,
+            outcome,
+            diagnostics,
+            trader_state,
+            actor_ids,
+            strategy_ids,
+            exec_algorithm_ids,
+            summary: result.summary.into_iter().collect(),
+            orders,
+            positions,
+            position_snapshots,
+            accounts,
+            portfolio_snapshots,
+            statistics,
+        })
+    }
+
     fn build_result_summary(
         &self,
         cache: &Cache,
@@ -1213,7 +1364,7 @@ impl BacktestEngine {
         summary
     }
 
-    fn route_data_to_exchange(&self, data: &Data) {
+    fn route_data_to_exchange(&mut self, data: &Data) {
         if matches!(
             data,
             Data::MarkPriceUpdate(_)
@@ -1231,33 +1382,49 @@ impl BacktestEngine {
         let venue = data.instrument_id().venue;
         if let Some(exchange) = self.venues.get(&venue) {
             let mut exchange_ref = exchange.borrow_mut();
+            let mut processed_book_data = false;
 
             match data {
-                Data::Delta(delta) => exchange_ref.process_order_book_delta(*delta),
-                Data::Deltas(deltas) => exchange_ref.process_order_book_deltas(deltas),
-                Data::Depth10(depth) => exchange_ref.process_order_book_depth10(depth),
+                Data::Delta(delta) => {
+                    exchange_ref.process_order_book_delta(*delta);
+                    processed_book_data = true;
+                }
+                Data::Deltas(deltas) => {
+                    exchange_ref.process_order_book_deltas(deltas);
+                    processed_book_data = true;
+                }
+                Data::Depth10(depth) => {
+                    exchange_ref.process_order_book_depth10(depth);
+                    processed_book_data = true;
+                }
                 Data::Quote(quote) => exchange_ref.process_quote_tick(quote),
                 Data::Trade(trade) => exchange_ref.process_trade_tick(trade),
                 Data::Bar(bar) => exchange_ref.process_bar(*bar),
                 Data::InstrumentStatus(status) => exchange_ref.process_instrument_status(*status),
                 Data::InstrumentClose(close) => exchange_ref.process_instrument_close(*close),
                 Data::FundingRateUpdate(funding) => {
-                    let settlement_ns = exchange_ref.process_funding_rate(*funding);
-                    drop(exchange_ref);
-                    self.schedule_funding_settlement_if_required(
-                        exchange,
-                        funding.instrument_id,
-                        settlement_ns,
-                    );
+                    let settlement_ns =
+                        exchange_ref.process_funding_rate_deferred(*funding, data.ts_init());
+                    self.schedule_funding_settlement_if_required(venue, settlement_ns);
                 }
                 _ => {}
+            }
+
+            drop(exchange_ref);
+
+            if processed_book_data {
+                self.has_book_processed.insert(data.instrument_id());
             }
         } else {
             log::warn!("No exchange found for venue {venue}, data not routed");
         }
     }
 
-    fn advance_time_impl(&mut self, ts_now: UnixNanos, clocks: &[Rc<RefCell<dyn Clock>>]) {
+    fn advance_time_impl(
+        &mut self,
+        ts_now: UnixNanos,
+        clocks: &[Rc<RefCell<dyn Clock>>],
+    ) -> anyhow::Result<()> {
         for clock in clocks {
             Self::advance_clock_on_accumulator(&mut self.accumulator, clock, ts_now, false);
         }
@@ -1269,47 +1436,31 @@ impl BacktestEngine {
             UnixNanos::default()
         };
 
-        let mut ts_last: Option<UnixNanos> = None;
         let mut shutdown_at: Option<UnixNanos> = None;
 
-        while let Some(handler) = self.accumulator.pop_next_at_or_before(ts_before) {
-            let ts_event = handler.event.ts_event;
+        while let Some(ts_event) = self
+            .accumulator
+            .peek_next_time()
+            .filter(|ts_event| *ts_event <= ts_before)
+        {
+            self.run_timer_handlers_at(clocks, ts_event, ts_now);
 
-            // Settle previous timestamp batch before advancing
-            if let Some(ts) = ts_last
-                && ts != ts_event
-            {
-                self.settle_venues(ts);
-                self.run_venue_modules(ts);
-                self.run_venue_liquidations(ts);
+            if self.kernel.is_shutdown_requested() {
+                self.accumulator.clear();
+                shutdown_at = Some(ts_event);
+                break;
             }
+            self.finalize_timestamp(clocks, ts_event)?;
 
-            ts_last = Some(ts_event);
-            Self::set_all_clocks_time(clocks, ts_event);
-            logging_clock_set_static_time(ts_event.as_u64());
-
-            handler.run();
-            self.drain_command_queues();
-
-            // Drop queued events on a handler-triggered shutdown so no later
-            // timer fires after the graceful stop
             if self.kernel.is_shutdown_requested() {
                 self.accumulator.clear();
                 shutdown_at = Some(ts_event);
                 break;
             }
 
-            // Re-advance clocks to capture chained timers
             for clock in clocks {
                 Self::advance_clock_on_accumulator(&mut self.accumulator, clock, ts_now, false);
             }
-        }
-
-        // Settle the last timestamp batch
-        if let Some(ts) = ts_last {
-            self.settle_venues(ts);
-            self.run_venue_modules(ts);
-            self.run_venue_liquidations(ts);
         }
 
         // On a mid-drain shutdown, anchor state at the firing timer's ts so
@@ -1320,63 +1471,53 @@ impl BacktestEngine {
             Self::set_all_clocks_time(clocks, ts_now);
             logging_clock_set_static_time(ts_now.as_u64());
         }
+
+        Ok(())
     }
 
-    fn flush_accumulator_events(&mut self, clocks: &[Rc<RefCell<dyn Clock>>], ts_now: UnixNanos) {
+    fn flush_accumulator_events(
+        &mut self,
+        clocks: &[Rc<RefCell<dyn Clock>>],
+        ts_now: UnixNanos,
+    ) -> anyhow::Result<()> {
         // Bail after shutdown so handler-scheduled alerts do not fire post-stop
         if self.kernel.is_shutdown_requested() {
             self.accumulator.clear();
-            return;
+            return Ok(());
         }
 
         for clock in clocks {
             Self::advance_clock_on_accumulator(&mut self.accumulator, clock, ts_now, false);
         }
 
-        let mut ts_last: Option<UnixNanos> = None;
+        while let Some(ts_event) = self
+            .accumulator
+            .peek_next_time()
+            .filter(|ts_event| *ts_event <= ts_now)
+        {
+            self.run_timer_handlers_at(clocks, ts_event, ts_now);
 
-        while let Some(handler) = self.accumulator.pop_next_at_or_before(ts_now) {
-            let ts_event = handler.event.ts_event;
-
-            // Settle previous timestamp batch before advancing
-            if let Some(ts) = ts_last
-                && ts != ts_event
-            {
-                self.settle_venues(ts);
-                self.run_venue_modules(ts);
-                self.run_venue_liquidations(ts);
+            if self.kernel.is_shutdown_requested() {
+                self.accumulator.clear();
+                break;
             }
+            self.finalize_timestamp(clocks, ts_event)?;
 
-            ts_last = Some(ts_event);
-            Self::set_all_clocks_time(clocks, ts_event);
-            logging_clock_set_static_time(ts_event.as_u64());
-
-            handler.run();
-            self.drain_command_queues();
-
-            // Drop queued events on a handler-triggered shutdown so no later
-            // timer fires after the graceful stop
             if self.kernel.is_shutdown_requested() {
                 self.accumulator.clear();
                 break;
             }
 
-            // Re-advance clocks to capture chained timers
             for clock in clocks {
                 Self::advance_clock_on_accumulator(&mut self.accumulator, clock, ts_now, false);
             }
         }
 
-        // Settle the last timestamp batch
-        if let Some(ts) = ts_last {
-            self.settle_venues(ts);
-            self.run_venue_modules(ts);
-            self.run_venue_liquidations(ts);
-        }
+        Ok(())
     }
 
-    fn process_next_timer(&mut self, clocks: &[Rc<RefCell<dyn Clock>>]) -> bool {
-        self.flush_accumulator_events(clocks, self.last_ns);
+    fn process_next_timer(&mut self, clocks: &[Rc<RefCell<dyn Clock>>]) -> anyhow::Result<bool> {
+        self.flush_accumulator_events(clocks, self.last_ns)?;
 
         // Find minimum next timer time across all component clocks
         let mut min_next_time: Option<UnixNanos> = None;
@@ -1396,14 +1537,137 @@ impl BacktestEngine {
         }
 
         match min_next_time {
-            None => true,
-            Some(t) if t > self.end_ns => true,
+            None => Ok(true),
+            Some(t) if t > self.end_ns => Ok(true),
             Some(t) => {
                 self.last_ns = t;
-                self.flush_accumulator_events(clocks, t);
-                false
+                self.flush_accumulator_events(clocks, t)?;
+                Ok(false)
             }
         }
+    }
+
+    fn run_timer_handlers_at(
+        &mut self,
+        clocks: &[Rc<RefCell<dyn Clock>>],
+        ts_event: UnixNanos,
+        advance_to: UnixNanos,
+    ) {
+        while self.accumulator.peek_next_time() == Some(ts_event) {
+            let handler = self
+                .accumulator
+                .pop_next_at_or_before(ts_event)
+                .expect("timer exists at timestamp");
+            Self::set_all_clocks_time(clocks, ts_event);
+            logging_clock_set_static_time(ts_event.as_u64());
+            handler.run();
+            self.drain_command_queues();
+
+            if self.kernel.is_shutdown_requested() {
+                return;
+            }
+
+            for clock in clocks {
+                Self::advance_clock_on_accumulator(&mut self.accumulator, clock, advance_to, false);
+            }
+        }
+    }
+
+    fn finalize_timestamp(
+        &mut self,
+        clocks: &[Rc<RefCell<dyn Clock>>],
+        ts_now: UnixNanos,
+    ) -> anyhow::Result<()> {
+        loop {
+            self.settle_venues(ts_now);
+
+            if self.kernel.is_shutdown_requested() {
+                self.accumulator.clear();
+                break;
+            }
+
+            for clock in clocks {
+                Self::advance_clock_on_accumulator(&mut self.accumulator, clock, ts_now, false);
+            }
+
+            if self.accumulator.peek_next_time() == Some(ts_now) {
+                self.run_timer_handlers_at(clocks, ts_now, ts_now);
+                continue;
+            }
+
+            if !self.settle_funding_rates(ts_now)? {
+                break;
+            }
+        }
+
+        self.run_venue_modules(ts_now);
+        self.run_venue_liquidations(ts_now);
+        Ok(())
+    }
+
+    fn settle_funding_rates(&mut self, ts_now: UnixNanos) -> anyhow::Result<bool> {
+        let mut due = self
+            .venues
+            .iter()
+            .flat_map(|(venue, exchange)| {
+                exchange
+                    .borrow()
+                    .funding_boundaries_due(ts_now)
+                    .into_iter()
+                    .map(|(boundary, instrument_id)| (boundary, *venue, instrument_id))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        due.sort_unstable();
+
+        if let Some((boundary, venue, instrument_id)) = due
+            .iter()
+            .copied()
+            .find(|(boundary, _, _)| *boundary < ts_now)
+        {
+            return self.fail_funding(format!(
+                "Late funding boundary for {instrument_id} on {venue}: {boundary} < replay timestamp {ts_now}"
+            ));
+        }
+
+        if due.is_empty() {
+            return Ok(false);
+        }
+
+        for (boundary, venue, instrument_id) in due {
+            if !self.venues[&venue]
+                .borrow_mut()
+                .settle_funding_boundary(boundary, instrument_id)
+            {
+                return self.fail_funding(format!(
+                    "Funding settlement failed for {instrument_id} on {venue} at {boundary}"
+                ));
+            }
+        }
+
+        let next_boundaries = self
+            .venues
+            .iter()
+            .filter_map(|(venue, exchange)| {
+                exchange
+                    .borrow()
+                    .next_funding_boundary()
+                    .map(|boundary| (*venue, boundary))
+            })
+            .collect::<Vec<_>>();
+
+        for (venue, boundary) in next_boundaries {
+            self.schedule_funding_settlement_if_required(venue, Some(boundary));
+        }
+
+        Ok(true)
+    }
+
+    fn fail_funding<T>(&mut self, error: String) -> anyhow::Result<T> {
+        if self.funding_error.is_none() {
+            self.funding_error = Some(error.clone());
+        }
+        Err(anyhow::anyhow!(error))
     }
 
     fn set_instrument_expiration_timers(&self) -> anyhow::Result<()> {
@@ -1459,34 +1723,25 @@ impl BacktestEngine {
 
     fn schedule_funding_settlement_if_required(
         &self,
-        exchange: &Rc<RefCell<SimulatedExchange>>,
-        instrument_id: InstrumentId,
+        venue: Venue,
         settlement_ns: Option<UnixNanos>,
     ) {
         let Some(settlement_ns) = settlement_ns else {
             return;
         };
 
-        if let Err(e) = self.set_funding_settlement_timer(exchange, instrument_id, settlement_ns) {
-            log::error!("Cannot schedule funding settlement for {instrument_id}: {e}");
+        if let Err(e) = self.set_funding_settlement_timer(venue, settlement_ns) {
+            log::error!("Cannot schedule funding settlement for {venue}: {e}");
         }
     }
 
     fn set_funding_settlement_timer(
         &self,
-        exchange: &Rc<RefCell<SimulatedExchange>>,
-        instrument_id: InstrumentId,
+        venue: Venue,
         settlement_ns: UnixNanos,
     ) -> anyhow::Result<()> {
-        let timer_name = Self::funding_settlement_timer_name(instrument_id);
-        let exchange: Weak<RefCell<SimulatedExchange>> = Rc::downgrade(exchange);
-        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |event: TimeEvent| {
-            if let Some(exchange) = exchange.upgrade() {
-                exchange
-                    .borrow_mut()
-                    .process_funding_settlement(instrument_id, event.ts_event);
-            }
-        });
+        let timer_name = Self::funding_settlement_timer_name(venue);
+        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(|_| {});
         let mut clock = self.kernel.clock.borrow_mut();
 
         clock.set_time_alert_ns(
@@ -1499,8 +1754,15 @@ impl BacktestEngine {
         Ok(())
     }
 
-    fn funding_settlement_timer_name(instrument_id: InstrumentId) -> String {
-        format!("FUNDING-SETTLEMENT:{instrument_id}")
+    fn funding_settlement_timer_name(venue: Venue) -> String {
+        format!("FUNDING-SETTLEMENT:{venue}")
+    }
+
+    fn cancel_funding_settlement_timers(&self) {
+        let mut clock = self.kernel.clock.borrow_mut();
+        for venue in self.venues.keys() {
+            clock.cancel_timer(&Self::funding_settlement_timer_name(*venue));
+        }
     }
 
     fn collect_all_clocks(&self) -> Vec<Rc<RefCell<dyn Clock>>> {
@@ -1892,18 +2154,18 @@ mod tests {
             execution::{SubmitOrder, TradingCommand},
         },
         msgbus::{
-            self, MessagingSwitchboard,
+            self, MessagingSwitchboard, TypedHandler,
             stubs::{TypedIntoMessageSavingHandler, get_typed_into_message_saving_handler},
         },
     };
-    use nautilus_execution::engine::SnapshotAnchorer;
+    use nautilus_execution::engine::{SnapshotAnchorer, stubs::StubExecutionClient};
     use nautilus_model::{
-        data::{Data, InstrumentStatus},
+        data::{Data, InstrumentStatus, QuoteTick},
         enums::{
             AccountType, BookType, MarketStatus, MarketStatusAction, OmsType, OrderSide,
             OrderStatus, OrderType, TriggerType,
         },
-        identifiers::{ActorId, ClientId, ComponentId, PositionId, StrategyId, Venue},
+        identifiers::{AccountId, ActorId, ClientId, ComponentId, PositionId, StrategyId, Venue},
         instruments::{
             CryptoPerpetual, Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt,
         },
@@ -2003,6 +2265,159 @@ mod tests {
             .unwrap();
         engine.add_venue(venue_config).unwrap();
         engine
+    }
+
+    #[rstest]
+    fn test_add_duplicate_venue_preserves_original_exchange(
+        crypto_perpetual_ethusdt: CryptoPerpetual,
+    ) {
+        let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+        let venue = Venue::from("BINANCE");
+        let venue_config = SimulatedVenueConfig::builder()
+            .venue(venue)
+            .oms_type(OmsType::Netting)
+            .account_type(AccountType::Margin)
+            .book_type(BookType::L1_MBP)
+            .starting_balances(vec![Money::from("1_000_000 USDT")])
+            .build()
+            .unwrap();
+        engine.add_venue(venue_config).unwrap();
+
+        let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
+        let instrument_id = instrument.id();
+        engine.add_instrument(&instrument).unwrap();
+
+        let initial_quote = QuoteTick::new(
+            instrument_id,
+            Price::from("1000.00"),
+            Price::from("1001.00"),
+            Quantity::from("1.000"),
+            Quantity::from("1.000"),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+        );
+        msgbus::send_quote(
+            format!("SimulatedExchange.process_new_quote.{venue}").into(),
+            &initial_quote,
+        );
+
+        let best_bid_before = engine
+            .venues
+            .get(&venue)
+            .unwrap()
+            .borrow()
+            .best_bid_price(instrument_id);
+        let best_ask_before = engine
+            .venues
+            .get(&venue)
+            .unwrap()
+            .borrow()
+            .best_ask_price(instrument_id);
+        let original_exchange = Rc::downgrade(engine.venues.get(&venue).unwrap());
+        let venues_before = engine.list_venues();
+        let exec_clients_len_before = engine.exec_clients.len();
+        let client_ids_before = engine.kernel.exec_engine.borrow().client_ids();
+        let duplicate_config = SimulatedVenueConfig::builder()
+            .venue(venue)
+            .oms_type(OmsType::Netting)
+            .account_type(AccountType::Margin)
+            .book_type(BookType::L1_MBP)
+            .starting_balances(vec![Money::from("1_000_000 USDT")])
+            .build()
+            .unwrap();
+        assert!(engine.add_venue(duplicate_config).is_err());
+
+        let original_exchange = original_exchange
+            .upgrade()
+            .expect("the original exchange must remain alive");
+        assert!(Rc::ptr_eq(
+            &original_exchange,
+            engine.venues.get(&venue).unwrap()
+        ));
+        assert_eq!(engine.list_venues(), venues_before);
+        assert_eq!(engine.exec_clients.len(), exec_clients_len_before);
+        assert_eq!(
+            engine.kernel.exec_engine.borrow().client_ids(),
+            client_ids_before
+        );
+
+        let distinct_quote = QuoteTick::new(
+            instrument_id,
+            Price::from("2000.00"),
+            Price::from("2001.00"),
+            Quantity::from("2.000"),
+            Quantity::from("2.000"),
+            UnixNanos::from(2),
+            UnixNanos::from(2),
+        );
+        msgbus::send_quote(
+            format!("SimulatedExchange.process_new_quote.{venue}").into(),
+            &distinct_quote,
+        );
+
+        let original_exchange = original_exchange.borrow();
+        let best_bid_after = original_exchange.best_bid_price(instrument_id);
+        let best_ask_after = original_exchange.best_ask_price(instrument_id);
+        assert_ne!(best_bid_after, best_bid_before);
+        assert_ne!(best_ask_after, best_ask_before);
+        assert_eq!(best_bid_after, Some(Price::from("2000.00")));
+        assert_eq!(best_ask_after, Some(Price::from("2001.00")));
+    }
+
+    #[rstest]
+    fn test_add_venue_execution_registration_failure_publishes_nothing() {
+        let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+        let venue = Venue::from("SIM");
+        engine
+            .kernel
+            .exec_engine
+            .borrow_mut()
+            .register_client(Box::new(StubExecutionClient::new(
+                ClientId::from(venue.as_str()),
+                AccountId::from("SIM-001"),
+                venue,
+                OmsType::Netting,
+                None,
+            )))
+            .unwrap();
+        let client_ids_before = engine.kernel.exec_engine.borrow().client_ids();
+
+        let endpoint = format!("SimulatedExchange.process_new_quote.{venue}");
+        let received_quotes = Rc::new(RefCell::new(Vec::new()));
+        let received_quotes_handler = Rc::clone(&received_quotes);
+        let sentinel = TypedHandler::from_with_id("venue-setup-sentinel", move |quote| {
+            received_quotes_handler.borrow_mut().push(*quote);
+        });
+        msgbus::register_quote_endpoint(endpoint.as_str().into(), sentinel);
+
+        let venue_config = SimulatedVenueConfig::builder()
+            .venue(venue)
+            .oms_type(OmsType::Netting)
+            .account_type(AccountType::Margin)
+            .book_type(BookType::L1_MBP)
+            .starting_balances(vec![Money::from("1_000_000 USD")])
+            .build()
+            .unwrap();
+        assert!(engine.add_venue(venue_config).is_err());
+
+        assert!(!engine.venues.contains_key(&venue));
+        assert!(engine.exec_clients.is_empty());
+        assert_eq!(
+            engine.kernel.exec_engine.borrow().client_ids(),
+            client_ids_before
+        );
+
+        let quote = QuoteTick::new(
+            InstrumentId::from("TEST.SIM"),
+            Price::from("100.00"),
+            Price::from("101.00"),
+            Quantity::from("1"),
+            Quantity::from("1"),
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+        );
+        msgbus::send_quote(endpoint.as_str().into(), &quote);
+        assert_eq!(received_quotes.borrow().as_slice(), &[quote]);
     }
 
     #[rstest]

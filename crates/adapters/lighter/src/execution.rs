@@ -3100,7 +3100,9 @@ fn lighter_http_error_is_definite_api_rejection(error: &LighterHttpError) -> boo
     match error {
         LighterHttpError::RateLimit(_) | LighterHttpError::Venue { .. } => true,
         LighterHttpError::Http { status, .. } => *status < 500,
-        LighterHttpError::Network(_) | LighterHttpError::Parse(_) => false,
+        LighterHttpError::Network(_)
+        | LighterHttpError::HistoryIncomplete { .. }
+        | LighterHttpError::Parse(_) => false,
     }
 }
 
@@ -4551,11 +4553,8 @@ fn dispatch_lighter_order(
     };
 
     let venue_order_id = VenueOrderId::new(order.order_id.as_str());
-    let resolved_cloid = dispatch.resolve_live_order_cloid(
-        order.client_order_id.as_str(),
-        venue_order_id,
-        order.nonce,
-    );
+    let resolved_cloid =
+        dispatch.resolve_live_order_cloid(order.client_order_id.as_str(), venue_order_id);
 
     let identity = resolved_cloid.and_then(|cid| {
         dispatch
@@ -5061,6 +5060,8 @@ mod tests {
     const TEST_API_KEY_INDEX: u8 = 5;
     const TEST_NEXT_NONCE: i64 = 42;
     const TEST_MARKET_INDEX: i16 = 0;
+    const TEST_ORDER_NONCE: i64 = 281_474_720_725_346;
+    const TEST_SUBMISSION_NONCE: i64 = 2_042;
 
     fn handle_send_tx_ack(
         dispatch: &WsDispatchState,
@@ -8144,7 +8145,7 @@ mod tests {
             ),
         );
         rig.dispatch
-            .mark_order_submission(&rig.cloid, 9_182_390_020);
+            .mark_order_submission(&rig.cloid, TEST_SUBMISSION_NONCE);
     }
 
     fn register_unowned_identity(rig: &DispatcherRig) {
@@ -8175,7 +8176,7 @@ mod tests {
             owner_account_index: TEST_ACCOUNT_INDEX_I64,
             initial_base_amount: Decimal::from_str("0.0050").unwrap(),
             price: Decimal::from_str("2352.74").unwrap(),
-            nonce: 9_182_390_020,
+            nonce: TEST_ORDER_NONCE,
             remaining_base_amount: Decimal::from_str("0.0050").unwrap(),
             is_ask: false,
             base_size: 50,
@@ -8732,7 +8733,8 @@ mod tests {
         assert!(!rig.dispatch.accepted_was_emitted(&rig.cloid));
         assert!(!rig.dispatch.venue_id_map.contains_key(&rig.cloid));
 
-        rig.dispatch.mark_order_submission(&rig.cloid, order.nonce);
+        rig.dispatch
+            .mark_order_submission(&rig.cloid, TEST_SUBMISSION_NONCE);
         dispatch_lighter_order(
             &order,
             &rig.dispatch,
@@ -8789,11 +8791,8 @@ mod tests {
             Some(local_venue_order_id),
         );
         assert_eq!(
-            rig.dispatch.resolve_live_order_cloid(
-                order.client_order_id.as_str(),
-                local_venue_order_id,
-                order.nonce + 1,
-            ),
+            rig.dispatch
+                .resolve_live_order_cloid(order.client_order_id.as_str(), local_venue_order_id,),
             Some(rig.cloid),
             "a bound identity remains stable across replay epochs",
         );
@@ -9514,19 +9513,15 @@ mod tests {
         restore_reconciled_order(&client.core, &client.dispatch, &retired_raw);
 
         assert_eq!(
-            client.dispatch.resolve_live_order_cloid(
-                &raw_client_id,
-                active_venue_order_id,
-                i64::MAX,
-            ),
+            client
+                .dispatch
+                .resolve_live_order_cloid(&raw_client_id, active_venue_order_id,),
             Some(active_cloid),
         );
         assert_eq!(
-            client.dispatch.resolve_live_order_cloid(
-                &raw_client_id,
-                retired_venue_order_id,
-                i64::MAX,
-            ),
+            client
+                .dispatch
+                .resolve_live_order_cloid(&raw_client_id, retired_venue_order_id,),
             Some(retired_cloid),
         );
         assert_eq!(
