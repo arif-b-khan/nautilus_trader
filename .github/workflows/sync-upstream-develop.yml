@@ -6,7 +6,7 @@ permissions: # Principle of least privilege
 
 on:
   schedule:
-    - cron: "0 1 * * *" # At 01:00 UTC daily
+    - cron: "0 1 * * 0" # Weekly on Sunday at 01:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -77,5 +77,5 @@ jobs:
               --base "${MAIN_BRANCH}" \
               --head "${DEVELOP_BRANCH}" \
               --title "Sync ${DEVELOP_BRANCH} into ${MAIN_BRANCH}" \
-              --body "Automated daily sync PR from upstream ${DEVELOP_BRANCH} into ${MAIN_BRANCH}."
+              --body "Automated weekly sync PR from upstream ${DEVELOP_BRANCH} into ${MAIN_BRANCH}."
           fi
